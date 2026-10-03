@@ -1,5 +1,4 @@
-// app/(app)/layout.tsx
-// Wraps every signed-in page in the nav shell + auth guard.
+// app/(app)/layout.tsx — every signed-in page sits inside the app frame.
 import AppShell from "@/components/AppShell";
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {

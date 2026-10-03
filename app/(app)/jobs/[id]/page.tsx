@@ -1,663 +1,795 @@
-// app/(app)/jobs/[id]/page.tsx
+// app/(app)/jobs/[id]/page.tsx — one trip.
 //
-// One trip, from the driver's hands.
-//
-// The screen follows the job in the order it actually happens:
-//
-//   1. COLLECT   tick each shop as you pick its bag up. The "I'm on my
-//                way" button stays locked until every shop is ticked —
-//                that is the guard against setting off having forgotten
-//                one of this customer's bags. The backend refuses it too,
-//                so a stale screen cannot get round it.
-//
-//   2. TRAVEL    one customer, one address, one amount. The customer's
-//                details are written once, because there is one customer
-//                — whatever the number of shops behind the trip.
-//
-//   3. THE DOOR  say what the customer actually took. Anything they
-//                refuse is cancelled: not delivered, NOT PAID, and still
-//                in your hands to take back. The cash figure is worked
-//                out by the backend from what was accepted, so it can
-//                never be more than the customer actually owes.
+// The screen changes with the trip:
+//   ASSIGNED    collect every shop's bag, then "start delivery"
+//   ON_THE_WAY  the customer, the money, what's in your bag → hand over
+//   FAILED      what happened, the office's new time → try again / return
+//   no tries left, or refused → the return-to-shops checklist
+//   DELIVERED / RETURNED → a short summary
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { useParams } from "next/navigation";
+import { useState } from "react";
 import {
-  Ban, Banknote, Check, CheckCircle2, ChevronDown, ChevronUp,
-  MapPin, Navigation, Phone, RotateCcw, Store, Truck, XCircle,
+  AlertTriangle, ArrowRight, Ban, Banknote, CalendarClock, Check, CheckCircle2, ChevronDown, ChevronUp, Clock, Headphones,
+  Lock, MapPin, MessageSquareText, PackageCheck, PhoneOff, RefreshCw, RotateCcw, ShoppingBag, Store, Undo2, UserX, Wallet, XCircle,
 } from "lucide-react";
+import { errorText, useAsync } from "@/lib/driver";
 import {
-  getJob, collectStop, uncollectStop, startJob, completeJob, failJob, cancelJob, returnJob,
-  jobStyle, stopStyle, JOB_FAILURE_REASONS, JOB_CANCEL_REASONS,
-  type JobDetail,
+  collectStop, failJob, getJob, jobStyle, reasonLabel, returnJob, startJob, uncollectStop, JOB_FAILURE_REASONS, type JobDetail, type JobStop,
 } from "@/lib/jobs";
-import { ApiError } from "@/lib/api";
+import { dateTime, longDateTime, money, telHref, timeOf } from "@/lib/format";
+import { OFFICE_PHONE } from "@/lib/office";
 import {
-  Button, Card, ConfirmSheet, ErrorState, LoadingState, PageHeader, Row, Toast, dateTime, money,
+  BackBar, BottomBar, Button, CallNav, Card, CheckRow, ChoiceRow, ErrorState, FullLoader, INPUT, InlineError, Label, Page, Pill, Progress,
+  Sheet, StatusPill, useToast,
 } from "@/components/ui";
+import { ItemThumb, itemsLine, MoneyLine, Stepper, stopCash } from "@/components/trip";
 
-type Sheet = "none" | "deliver" | "fail" | "cancel" | "return";
+export default function TripPage() {
+  const { id } = useParams<{ id: string }>();
+  const { data: job, loading, error, reload, refresh } = useAsync(() => getJob(id), [id]);
+  const [returning, setReturning] = useState(false);
+  const toast = useToast();
 
-export default function JobPage() {
-  const params = useParams<{ id: string }>();
-  const jobId = params?.id;
+  if (loading && !job) return <FullLoader label="Opening the trip…" />;
+  if (error && !job)
+    return (
+      <>
+        <BackBar title="Trip" href="/jobs" />
+        <Page bottom="none">
+          <ErrorState message={error} onRetry={reload} />
+        </Page>
+      </>
+    );
+  if (!job) return null;
 
-  const [job, setJob] = useState<JobDetail | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [toast, setToast] = useState<{ tone: "success" | "error"; message: string } | null>(null);
+  const mustGoBack = job.status === "CANCELLED" || (job.status === "FAILED" && job.mustReturn) || (job.status === "FAILED" && returning);
 
-  const [sheet, setSheet] = useState<Sheet>("none");
-  const [openShop, setOpenShop] = useState<string | null>(null);
+  return (
+    <>
+      {toast.node}
+      <BackBar title={job.jobNumber} kicker="Trip" href="/jobs" badge={<StatusPill style={jobStyle(job.status)} />} />
+      {job.status === "ASSIGNED" ? (
+        <CollectView job={job} onChange={refresh} toast={toast.show} />
+      ) : job.status === "ON_THE_WAY" ? (
+        <OnTheWayView job={job} onChange={refresh} toast={toast.show} />
+      ) : mustGoBack ? (
+        <ReturnView job={job} onChange={refresh} onCancel={job.status === "FAILED" && !job.mustReturn ? () => setReturning(false) : undefined} toast={toast.show} />
+      ) : job.status === "FAILED" ? (
+        <FailedView job={job} onChange={refresh} onReturn={() => setReturning(true)} toast={toast.show} />
+      ) : (
+        <DoneView job={job} />
+      )}
+    </>
+  );
+}
 
-  /** At the door: which shops the customer actually took. */
-  const [accepted, setAccepted] = useState<Set<string>>(new Set());
-  const [cashConfirmed, setCashConfirmed] = useState(false);
-  const [refusedReason, setRefusedReason] = useState("");
-  const [reason, setReason] = useState("");
-  const [notes, setNotes] = useState("");
+type ViewProps = { job: JobDetail; onChange: () => void; toast: (m: string, t?: "brand" | "danger") => void };
 
-  const load = useCallback(async () => {
-    if (!jobId) return;
-    setLoading(true);
-    setError(null);
+/* ── the head of every view ─────────────────────────────────────────── */
+
+function TripHead({ job, step, tag }: { job: JobDetail; step: number; tag?: React.ReactNode }) {
+  return (
+    <Card>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[17px] font-extrabold text-ink">Trip {job.jobNumber}</span>
+        {job.isIntercity && (
+          <Pill tone="brand">
+            <MapPin size={11} /> To {job.destinationCity ?? "another city"}
+          </Pill>
+        )}
+        {tag}
+      </div>
+      <div className="mt-4">
+        <Stepper current={step} />
+      </div>
+    </Card>
+  );
+}
+
+function CustomerCard({ job, title = "Customer drop-off", children }: { job: JobDetail; title?: string; children?: React.ReactNode }) {
+  const c = job.customer;
+  return (
+    <Card>
+      <Label>
+        <span className="flex items-center gap-1.5">
+          <MapPin size={13} /> {title}
+        </span>
+      </Label>
+      <p className="mt-2 text-[20px] font-extrabold text-ink">{c.name}</p>
+      <p className="mt-0.5 text-[13px] leading-snug text-ink-soft">
+        {[c.address, c.area || c.district].filter(Boolean).join(", ") || "No address given — call the customer"}
+      </p>
+      {c.landmark && (
+        <span className="mt-2 inline-flex items-center gap-1 rounded-lg bg-surface-sunken px-2 py-1 text-[11.5px] font-bold text-ink-soft">
+          <MapPin size={12} /> {c.landmark}
+        </span>
+      )}
+      {c.notes && (
+        <div className="mt-3 flex items-start gap-2.5 rounded-2xl bg-accent-light/60 p-3">
+          <MessageSquareText size={16} className="mt-0.5 shrink-0 text-accent-tint" />
+          <p className="text-[12.5px] leading-snug text-ink-soft">
+            <b className="text-ink">Note:</b> {c.notes}
+          </p>
+        </div>
+      )}
+      <div className="mt-3.5">
+        <CallNav phone={c.phone} place={[c.address, c.area || c.district, c.landmark, job.destinationCity]} callLabel="Call customer" navLabel="Navigate" />
+      </div>
+      {children}
+    </Card>
+  );
+}
+
+/* ── 1. collect the shops ───────────────────────────────────────────── */
+
+function CollectView({ job, onChange, toast }: ViewProps) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const stops = job.stops.filter((s) => s.status !== "MOVED");
+  const collected = stops.filter((s) => s.status === "COLLECTED").length;
+  const left = stops.length - collected;
+  const activeId = stops.find((s) => s.status !== "COLLECTED")?.id;
+
+  async function act(fn: () => Promise<unknown>, key: string, msg: string) {
+    setBusy(key);
+    setErr(null);
     try {
-      const detail = await getJob(jobId);
-      setJob(detail);
-      // Default at the door: the customer took everything. The driver
-      // only has to touch this when something is handed back.
-      setAccepted(new Set(detail.stops.filter((s) => s.status === "COLLECTED").map((s) => s.id)));
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not load this trip");
+      await fn();
+      toast(msg);
+      onChange();
+    } catch (e) {
+      setErr(errorText(e));
     } finally {
-      setLoading(false);
+      setBusy(null);
     }
-  }, [jobId]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  function fail(err: unknown) {
-    setToast({
-      tone: "error",
-      message: err instanceof ApiError ? err.message : "Something went wrong",
-    });
   }
 
-  async function run(fn: () => Promise<{ message?: string }>, closeSheet = true) {
+  return (
+    <>
+      <Page bottom="bar">
+        <TripHead job={job} step={0} tag={<Pill tone="violet">COLLECT SHOPS</Pill>} />
+
+        {left > 0 ? (
+          <Card>
+            <div className="flex items-center justify-between">
+              <span className="flex items-center gap-2 text-[14px] font-extrabold text-ink">
+                <span className="h-2 w-2 rounded-full bg-accent" /> Collection status
+              </span>
+              <Pill tone="brand">
+                {collected} of {stops.length} collected
+              </Pill>
+            </div>
+            <p className="mt-1.5 text-[12.5px] text-ink-muted">Collect every shop&apos;s bag before you set off.</p>
+            <div className="mt-3">
+              <Progress value={stops.length ? collected / stops.length : 0} />
+            </div>
+          </Card>
+        ) : (
+          <div className="rounded-[22px] bg-brand-mint p-4">
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-brand text-white">
+                <ShoppingBag size={19} />
+              </div>
+              <div>
+                <p className="text-[16px] font-extrabold text-brand">All bags collected!</p>
+                <p className="text-[12.5px] text-brand-tint">
+                  You have {stops.length} of {stops.length} shop bag{stops.length === 1 ? "" : "s"}. Start the delivery.
+                </p>
+              </div>
+            </div>
+            <div className="mt-3">
+              <Progress value={1} />
+            </div>
+          </div>
+        )}
+
+        <InlineError message={err} />
+
+        {stops.map((s, i) => {
+          const done = s.status === "COLLECTED";
+          const active = s.id === activeId;
+          const notReady = s.status === "WAITING";
+          return (
+            <div key={s.id} className={`overflow-hidden rounded-[22px] bg-white shadow-card ${active ? "ring-2 ring-violet/30" : ""}`}>
+              {active && <div className="h-1.5 bg-violet" />}
+              <div className="p-4">
+                <div className="flex items-start gap-3">
+                  {done ? (
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#22A06B] text-white">
+                      <Check size={18} strokeWidth={3} />
+                    </span>
+                  ) : (
+                    <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[14px] font-extrabold ${active ? "bg-violet text-white" : "bg-surface-sunken text-ink-muted"}`}>
+                      {i + 1}
+                    </span>
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-[16px] font-extrabold text-ink">{s.shop.name}</span>
+                      {done ? <Pill tone="brand" dot>IN BAG</Pill> : notReady ? <Pill tone="accent">NOT READY</Pill> : active ? <Pill tone="violet">NEXT</Pill> : null}
+                    </div>
+                    <p className="text-[12px] text-ink-muted">{s.shop.location ?? "No address on file"}</p>
+                  </div>
+                  {done && (
+                    <button
+                      onClick={() => act(() => uncollectStop(job.id, s.id), s.id, `${s.shop.name} unticked`)}
+                      disabled={busy !== null}
+                      className="shrink-0 rounded-lg px-2 py-1 text-[12px] font-extrabold text-accent-tint"
+                    >
+                      Undo
+                    </button>
+                  )}
+                </div>
+
+                {done ? (
+                  <div className="mt-3 flex items-center gap-2 rounded-xl bg-surface-sunken px-3 py-2.5 text-[12px] text-ink-soft">
+                    <PackageCheck size={15} className="shrink-0 text-brand-tint" />
+                    <span className="truncate">{itemsLine(s)}</span>
+                    <span className="ml-auto shrink-0 font-bold text-brand-tint">{s.orderNumber}</span>
+                  </div>
+                ) : (
+                  <>
+                    <div className="mt-3">
+                      <CallNav phone={s.shop.phone} place={[s.shop.name, s.shop.location]} callLabel="Call shop" navLabel="Open map" primary="call" size="sm" />
+                    </div>
+                    <div className="mt-3 flex flex-col gap-2">
+                      {s.items.map((it) => (
+                        <div key={it.id} className="flex items-center gap-3 rounded-2xl bg-surface-sunken p-2.5">
+                          <ItemThumb item={it} size={48} />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-[13px] font-extrabold text-ink">{it.productName}</p>
+                            <p className="truncate text-[11.5px] text-ink-muted">
+                              Qty {it.quantity}
+                              {it.variantLabel ? ` · ${it.variantLabel}` : ""}
+                            </p>
+                          </div>
+                          <span className="shrink-0 text-[11px] font-bold text-ink-faint">{it.orderNumber}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <Button
+                      onClick={() => act(() => collectStop(job.id, s.id), s.id, `${s.shop.name}'s bag is in your bag`)}
+                      loading={busy === s.id}
+                      disabled={notReady || (busy !== null && busy !== s.id)}
+                      icon={ShoppingBag}
+                      className="mt-3 w-full"
+                      variant={active ? "primary" : "secondary"}
+                    >
+                      {notReady ? "Shop is not ready yet" : "I have this shop's bag"}
+                    </Button>
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        })}
+
+        <CustomerCard job={job} title="Then deliver to" />
+      </Page>
+      <BottomBar>
+        {left > 0 ? (
+          <Button disabled icon={Lock} variant="secondary" className="w-full">
+            Collect {left} more shop{left === 1 ? "" : "s"} first
+          </Button>
+        ) : (
+          <Button
+            onClick={() => act(() => startJob(job.id), "start", "You're on the way — the customer is told")}
+            loading={busy === "start"}
+            iconRight={ArrowRight}
+            className="w-full"
+          >
+            I have everything — start delivery
+          </Button>
+        )}
+      </BottomBar>
+    </>
+  );
+}
+
+/* ── 2. on the way ──────────────────────────────────────────────────── */
+
+const FAIL_ICONS: Record<string, React.ElementType> = {
+  customer_unavailable: UserX,
+  customer_phone_unreachable: PhoneOff,
+  wrong_address: MapPin,
+  customer_requested_later: CalendarClock,
+  payment_issue: Wallet,
+  other: MessageSquareText,
+};
+
+function MoneyBox({ job }: { job: JobDetail }) {
+  const cash = job.money.amountToCollect;
+  if (cash <= 0) {
+    return (
+      <div className="flex items-center gap-3 rounded-[22px] bg-brand-mint p-4">
+        <CheckCircle2 size={24} className="shrink-0 text-brand" />
+        <div>
+          <p className="text-[15px] font-extrabold text-brand">Already paid — take no money</p>
+          <p className="text-[12px] text-brand-tint">The customer paid online with Zaad or eDahab.</p>
+        </div>
+      </div>
+    );
+  }
+  const live = job.stops.filter((s) => s.status === "COLLECTED");
+  const products = live.reduce((t, s) => t + (stopCash(s) ? s.money.productTotal : 0), 0);
+  const fee = live.reduce((t, s) => t + (stopCash(s) ? s.money.deliveryFee : 0), 0);
+  return (
+    <div className="rounded-[22px] bg-accent-light p-4">
+      <div className="flex items-center justify-between">
+        <span className="flex items-center gap-1.5 text-[11px] font-extrabold uppercase tracking-[0.1em] text-accent-deep">
+          <Banknote size={15} /> Take from the customer
+        </span>
+        <span className="rounded-lg bg-accent-soft px-2 py-0.5 text-[10.5px] font-extrabold text-accent-deep">CASH</span>
+      </div>
+      <div className="mt-1 text-[34px] font-extrabold leading-tight text-accent-deep">{money(cash)}</div>
+      <p className="text-[12px] text-accent-deep/80">
+        Products {money(products)} + delivery fee {money(fee)}
+      </p>
+    </div>
+  );
+}
+
+function BagList({ job, title = "In your bag" }: { job: JobDetail; title?: string }) {
+  const [open, setOpen] = useState(true);
+  const live = job.stops.filter((s) => s.status === "COLLECTED");
+  const items = live.reduce((t, s) => t + s.itemCount, 0);
+  return (
+    <Card>
+      <button onClick={() => setOpen((o) => !o)} className="flex w-full items-center gap-2 text-left">
+        <ShoppingBag size={17} className="text-ink-soft" />
+        <span className="flex-1 text-[15px] font-extrabold text-ink">
+          {title} ({live.length} shop{live.length === 1 ? "" : "s"}, {items} item{items === 1 ? "" : "s"})
+        </span>
+        {open ? <ChevronUp size={18} className="text-ink-muted" /> : <ChevronDown size={18} className="text-ink-muted" />}
+      </button>
+      {open && (
+        <div className="mt-3 flex flex-col gap-2">
+          {live.map((s) => (
+            <div key={s.id} className="flex items-center gap-3 rounded-2xl bg-surface-sunken px-3.5 py-3">
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-[13.5px] font-extrabold text-ink">{s.shop.name}</p>
+                <p className="truncate text-[11.5px] text-ink-muted">{itemsLine(s)}</p>
+              </div>
+              <Pill tone="brand">
+                <Check size={11} strokeWidth={3} /> In bag
+              </Pill>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function OnTheWayView({ job, onChange, toast }: ViewProps) {
+  const [failOpen, setFailOpen] = useState(false);
+  const max = job.proofRules?.maxAttempts ?? 2;
+  return (
+    <>
+      <Page bottom="bar">
+        <TripHead job={job} step={1} tag={<Pill tone="accent">TRY {Math.max(1, job.attemptCount)} OF {max}</Pill>} />
+        <CustomerCard job={job} />
+        <MoneyBox job={job} />
+        <BagList job={job} />
+      </Page>
+      <BottomBar>
+        <Button href={`/jobs/${job.id}/handover`} iconRight={ArrowRight} className="w-full">
+          I&apos;m at the customer — hand over
+        </Button>
+        <div className="mt-1 grid grid-cols-2">
+          <button onClick={() => setFailOpen(true)} className="flex min-h-[44px] items-center justify-center gap-1.5 text-[13px] font-extrabold text-ink-soft">
+            <XCircle size={16} /> Couldn&apos;t deliver
+          </button>
+          <Link href={`/jobs/${job.id}/refused`} className="flex min-h-[44px] items-center justify-center gap-1.5 text-[13px] font-extrabold text-danger">
+            <Ban size={16} /> Customer refused
+          </Link>
+        </div>
+      </BottomBar>
+      <FailSheet job={job} open={failOpen} onClose={() => setFailOpen(false)} onDone={onChange} toast={toast} />
+    </>
+  );
+}
+
+function FailSheet({ job, open, onClose, onDone, toast }: { job: JobDetail; open: boolean; onClose: () => void; onDone: () => void; toast: ViewProps["toast"] }) {
+  const [reason, setReason] = useState("");
+  const [notes, setNotes] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const max = job.proofRules?.maxAttempts ?? 2;
+  const thisTry = Math.max(1, job.attemptCount);
+  const last = thisTry >= max;
+
+  async function submit() {
+    if (!reason) return setErr("Choose what happened");
+    if (reason === "other" && !notes.trim()) return setErr("Write a short note for the office");
     setBusy(true);
+    setErr(null);
     try {
-      const result = await fn();
-      if (closeSheet) setSheet("none");
-      if (result?.message) setToast({ tone: "success", message: result.message });
-      await load();
-    } catch (err) {
-      fail(err);
+      const r = await failJob(job.id, { reason, notes: notes.trim() || undefined });
+      toast(r.mustReturn ? "No tries left — take everything back to the shops" : "Reported — everything stays with you", r.mustReturn ? "danger" : "brand");
+      onClose();
+      onDone();
+    } catch (e) {
+      setErr(errorText(e));
     } finally {
       setBusy(false);
     }
   }
 
-  if (loading) return <LoadingState label="Loading the trip…" />;
-  if (error) return <ErrorState message={error} onRetry={load} />;
-  if (!job) return null;
+  return (
+    <Sheet
+      open={open}
+      onClose={onClose}
+      title="What happened?"
+      subtitle={`Why couldn't you deliver trip ${job.jobNumber}?`}
+      footer={
+        <>
+          <InlineError message={err} />
+          <Button onClick={submit} loading={busy} disabled={!reason} icon={XCircle} className="mt-2 w-full">
+            Report couldn&apos;t deliver
+          </Button>
+          <button onClick={onClose} className="mt-1 min-h-[44px] w-full text-[13px] font-bold text-ink-muted">
+            Back to the trip
+          </button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-2">
+        {JOB_FAILURE_REASONS.map((r) => (
+          <ChoiceRow key={r.value} selected={reason === r.value} onClick={() => setReason(r.value)} icon={FAIL_ICONS[r.value]} title={r.label} sub={r.hint} />
+        ))}
+      </div>
+      <label className="mt-4 block text-[12.5px] font-extrabold text-ink">
+        Note for the office <span className="font-semibold text-ink-faint">{reason === "other" ? "(needed)" : "(optional)"}</span>
+      </label>
+      <textarea
+        className={`${INPUT} mt-2 min-h-[84px] resize-none`}
+        placeholder="e.g. Gate locked, guard says the customer is back at 4 PM"
+        value={notes}
+        onChange={(e) => setNotes(e.target.value)}
+      />
+      <div className={`mt-3 flex items-start gap-2.5 rounded-2xl p-3.5 ${last ? "bg-danger-light" : "bg-surface-sunken"}`}>
+        <Clock size={16} className={`mt-0.5 shrink-0 ${last ? "text-danger" : "text-ink-muted"}`} />
+        <p className={`text-[12px] leading-snug ${last ? "font-bold text-danger" : "text-ink-soft"}`}>
+          This is try {thisTry} of {max}.{" "}
+          {last
+            ? "It's the last one — after this you take everything back to the shops."
+            : "Everything stays with you. You can try again later, or the office will give a new time."}
+        </p>
+      </div>
+    </Sheet>
+  );
+}
 
-  const style = jobStyle(job.status);
-  const collecting = job.status === "ASSIGNED";
-  const travelling = job.status === "ON_THE_WAY";
-  const failedNow = job.status === "FAILED";
-  const finished = ["DELIVERED", "CANCELLED", "RETURNED"].includes(job.status);
-  const left = job.progress.shopCount - job.progress.collectedCount;
+/* ── 3. failed, can try again ───────────────────────────────────────── */
 
-  // What the customer owes for what they are actually taking. Shown so
-  // the driver knows the figure BEFORE they knock; the backend works out
-  // the real one from the same rule, so the two always agree.
-  const carried = job.stops.filter((s) => s.status === "COLLECTED");
-  const takingNow = carried.filter((s) => accepted.has(s.id));
-  const cashDue = takingNow
-    .filter((s) => s.money.isCod && !s.money.isPaid)
-    .reduce((sum, s) => sum + s.money.total, 0);
-  const refusedCount = carried.length - takingNow.length;
+function FailedView({ job, onChange, onReturn, toast }: ViewProps & { onReturn: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const max = job.proofRules?.maxAttempts ?? 2;
+  const live = job.stops.filter((s) => s.status === "COLLECTED");
+  const total = live.reduce((t, s) => t + s.money.total, 0);
+
+  async function retry() {
+    setBusy(true);
+    setErr(null);
+    try {
+      await startJob(job.id);
+      toast("You're on the way again");
+      onChange();
+    } catch (e) {
+      setErr(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <>
-      <PageHeader
-        title={job.jobNumber}
-        subtitle={`${job.progress.shopCount} shop${job.progress.shopCount === 1 ? "" : "s"} · ${job.totalItems} item${job.totalItems === 1 ? "" : "s"} · one customer`}
-        back="/jobs"
-        right={
-          <span
-            className="shrink-0 rounded-full px-3 py-1.5 text-[11px] font-extrabold"
-            style={{ background: style.bg, color: style.fg }}
-          >
-            {style.label}
-          </span>
-        }
-      />
-
-      {/* ══ 1. THE SHOPS ══ */}
-      <Card
-        title={collecting ? `Collect from ${job.progress.shopCount} shop${job.progress.shopCount === 1 ? "" : "s"}` : "Shops on this trip"}
-        icon={<Store className="h-4 w-4 text-brand" />}
-        className="mb-3"
-      >
-        {collecting && (
-          <p className="mb-3 rounded-xl bg-surface-sunken px-3 py-2 text-[12px] leading-[1.6] text-ink-muted">
-            Tap each shop as you pick its bag up.{" "}
-            {left > 0 ? (
-              <strong className="text-accent">
-                {left} left — you can&apos;t set off until they&apos;re all in.
-              </strong>
-            ) : (
-              <strong className="text-[#2C6B44]">All in your bag. You&apos;re ready to go.</strong>
-            )}
-          </p>
-        )}
-
-        <div className="flex flex-col gap-2.5">
-          {job.stops.map((stop, i) => {
-            const sStyle = stopStyle(stop.status);
-            const inBag = stop.status === "COLLECTED";
-            const canTick = collecting && (stop.status === "READY" || inBag);
-            const open = openShop === stop.id;
-
-            return (
-              <div
-                key={stop.id}
-                className="rounded-2xl border p-3"
-                style={{ borderColor: inBag ? "#CBE5D4" : "#EEF0F5", background: inBag ? "#F7FCF9" : "#FFF" }}
-              >
-                <div className="flex items-start gap-2.5">
-                  {/* the tick */}
-                  {canTick ? (
-                    <button
-                      disabled={busy}
-                      onClick={() =>
-                        run(
-                          () => (inBag ? uncollectStop(job.id, stop.id) : collectStop(job.id, stop.id)),
-                          false
-                        )
-                      }
-                      aria-label={inBag ? `Undo ${stop.shop.name}` : `Collected from ${stop.shop.name}`}
-                      className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border-2 transition-colors disabled:opacity-50"
-                      style={{
-                        borderColor: inBag ? "#2C6B44" : "#D6DAE2",
-                        background: inBag ? "#2C6B44" : "#FFF",
-                      }}
-                    >
-                      {inBag ? (
-                        <Check className="h-5 w-5 text-white" />
-                      ) : (
-                        <span className="text-[14px] font-extrabold text-ink-faint">{i + 1}</span>
-                      )}
-                    </button>
-                  ) : (
-                    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-surface-sunken text-[14px] font-extrabold text-ink-faint">
-                      {i + 1}
-                    </span>
-                  )}
-
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-[13.5px] font-extrabold text-ink">{stop.shop.name}</span>
-                      <span
-                        className="rounded-full px-2 py-0.5 text-[9.5px] font-extrabold"
-                        style={{ background: sStyle.bg, color: sStyle.fg }}
-                      >
-                        {sStyle.label}
-                      </span>
-                    </div>
-                    {stop.shop.location && (
-                      <div className="mt-0.5 flex items-center gap-1 text-[12px] text-ink-muted">
-                        <MapPin className="h-3 w-3 shrink-0" />
-                        {stop.shop.location}
-                      </div>
-                    )}
-                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-                      {stop.shop.phone ? (
-                        <a
-                          href={`tel:${stop.shop.phone}`}
-                          className="inline-flex items-center gap-1 rounded-lg bg-brand-light px-2 py-1 text-[12px] font-bold text-brand"
-                        >
-                          <Phone className="h-3 w-3" />
-                          Call the shop
-                        </a>
-                      ) : (
-                        <span className="text-[11px] text-ink-faint">No number on file</span>
-                      )}
-                      <button
-                        onClick={() => setOpenShop(open ? null : stop.id)}
-                        className="inline-flex items-center gap-1 text-[12px] font-bold text-ink-soft"
-                      >
-                        {stop.itemCount} item{stop.itemCount === 1 ? "" : "s"}
-                        {open ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                {stop.refusedReason && (
-                  <p className="mt-2 rounded-xl bg-[#FDEAEA] px-3 py-2 text-[11.5px] font-semibold text-[#C4362A]">
-                    Refused at the door — {stop.refusedReason}
-                  </p>
-                )}
-
-                {open && (
-                  <div className="mt-2.5 flex flex-col divide-y divide-line-soft border-t border-line-soft pt-1">
-                    {stop.items.length === 0 ? (
-                      <p className="py-2 text-[12px] text-ink-faint">No items recorded.</p>
-                    ) : (
-                      stop.items.map((item) => (
-                        <div key={item.id} className="flex items-center gap-2 py-2">
-                          <div className="min-w-0 flex-1">
-                            <div className="truncate text-[12.5px] font-semibold text-ink">
-                              {item.productName}
-                            </div>
-                            {item.variantLabel && (
-                              <div className="text-[11px] text-ink-faint">{item.variantLabel}</div>
-                            )}
-                          </div>
-                          <span className="shrink-0 text-[12px] font-bold text-ink-soft">
-                            × {item.quantity}
-                          </span>
-                        </div>
-                      ))
-                    )}
-                    <div className="pt-2 text-[11px] text-ink-faint">
-                      Order {stop.orderNumber} · {money(stop.money.productTotal)} of goods
-                    </div>
-                  </div>
-                )}
+      <Page bottom="bar">
+        <div className="rounded-[22px] bg-danger-light p-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-danger text-white">
+              <XCircle size={21} />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-md bg-danger px-2 py-0.5 text-[10px] font-extrabold text-white">
+                  TRY {job.attemptCount}/{max}
+                </span>
+                <span className="text-[11.5px] font-bold text-danger">{timeOf(job.timestamps.failedAt)}</span>
               </div>
-            );
-          })}
-        </div>
-      </Card>
-
-      {/* ══ 2. THE CUSTOMER — written once ══ */}
-      <Card title="The customer" icon={<Navigation className="h-4 w-4 text-brand" />} className="mb-3">
-        <div className="text-[15px] font-extrabold text-ink">{job.customer.name}</div>
-        <div className="mt-1 flex items-start gap-1.5 text-[13px] text-ink-soft">
-          <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-faint" />
-          <span>
-            {job.customer.address || "No address given"}
-            {job.customer.landmark ? ` — ${job.customer.landmark}` : ""}
-          </span>
-        </div>
-        {(job.customer.district || job.customer.area) && (
-          <div className="mt-0.5 pl-5 text-[12px] text-ink-faint">
-            {[job.customer.district, job.customer.area].filter(Boolean).join(" · ")}
+              <p className="mt-1 text-[17px] font-extrabold text-danger-deep">{reasonLabel(job.lastFailureReason) || "Couldn't deliver"}</p>
+              <p className="mt-0.5 text-[12.5px] leading-snug text-danger">Everything is still with you. Try again, or take it back to the shops.</p>
+            </div>
           </div>
-        )}
-        {job.customer.notes && (
-          <p className="mt-2 rounded-xl bg-surface-sunken px-3 py-2 text-[12.5px] leading-[1.6] text-ink-soft">
-            “{job.customer.notes}”
-          </p>
-        )}
-        <a
-          href={`tel:${job.customer.phone}`}
-          className="mt-3 flex min-h-[48px] items-center justify-center gap-2 rounded-2xl border border-line bg-white text-[14px] font-bold text-brand active:bg-surface-sunken"
-        >
-          <Phone className="h-4 w-4" />
-          Call {job.customer.phone}
-        </a>
-      </Card>
+        </div>
 
-      {/* ══ THE MONEY ══ */}
-      <Card title="The money" icon={<Banknote className="h-4 w-4 text-brand" />} className="mb-3">
-        <Row label="Goods" value={money(job.money.productTotal)} />
-        <Row
-          label={job.progress.shopCount > 1 ? `Delivery (one fee, ${job.progress.shopCount} shops)` : "Delivery"}
-          value={money(job.money.deliveryFee)}
-        />
-        <div className="mt-2 border-t border-line-soft pt-2">
-          {job.money.amountToCollect > 0 ? (
-            <div className="rounded-2xl bg-[#FFF6EC] p-3.5 text-center">
-              <div className="text-[11px] font-extrabold uppercase tracking-wide text-accent">
-                Collect at the door
-              </div>
-              <div className="mt-0.5 text-[30px] font-extrabold leading-none text-ink">
-                {money(job.money.amountToCollect)}
-              </div>
-              <div className="mt-1 text-[11.5px] text-ink-muted">
-                cash — goods plus the delivery fee
-              </div>
+        <Card>
+          <Label>
+            <span className="flex items-center gap-1.5">
+              <CalendarClock size={13} /> From the office
+            </span>
+          </Label>
+          {job.retryAt ? (
+            <div className="mt-3 rounded-2xl bg-surface-sunken p-3.5">
+              <p className="text-[10.5px] font-extrabold uppercase tracking-[0.1em] text-brand-tint">New delivery time</p>
+              <p className="mt-1 text-[20px] font-extrabold text-ink">{longDateTime(job.retryAt)}</p>
+              <p className="mt-1 text-[12px] text-ink-muted">The office agreed this time with the customer. Keep the bags safe until then.</p>
             </div>
           ) : (
-            <div className="rounded-2xl bg-[#EAF7EE] p-3.5 text-center">
-              <div className="text-[11px] font-extrabold uppercase tracking-wide text-[#2C6B44]">
-                Already paid
+            <p className="mt-2 text-[12.5px] leading-relaxed text-ink-soft">
+              No new time yet. Call the customer again — if they are ready, press <b>Try again now</b>. The office may also set a new time; it will show here.
+            </p>
+          )}
+        </Card>
+
+        <CustomerCard job={job} title="The customer" />
+
+        <Card>
+          <div className="flex items-center justify-between">
+            <span className="flex items-center gap-2 text-[15px] font-extrabold text-ink">
+              <ShoppingBag size={17} /> In your bag
+            </span>
+            <Pill tone="muted">
+              {live.length} shop{live.length === 1 ? "" : "s"}
+            </Pill>
+          </div>
+          <div className="mt-3 flex flex-col gap-2">
+            {live.map((s, i) => (
+              <div key={s.id} className="flex items-center gap-3 rounded-2xl bg-surface-sunken px-3.5 py-3">
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-brand-light text-[11px] font-extrabold text-brand">#{i + 1}</span>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-[13.5px] font-extrabold text-ink">{s.shop.name}</p>
+                  <p className="truncate text-[11px] text-ink-muted">{s.orderNumber}</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-[14px] font-extrabold text-ink">{money(s.money.total)}</p>
+                  <p className="text-[10px] font-bold text-ink-faint">{stopCash(s) ? "CASH" : "PAID"}</p>
+                </div>
               </div>
-              <div className="mt-0.5 text-[13px] font-bold text-ink">
-                Paid by Zaad / eDahab — take no money
+            ))}
+          </div>
+          <div className="mt-3 border-t border-line pt-3">
+            <MoneyLine label="Value in your bag" value={total} bold />
+          </div>
+        </Card>
+        <InlineError message={err} />
+      </Page>
+      <BottomBar>
+        <Button onClick={retry} loading={busy} icon={RefreshCw} className="w-full">
+          Try again now
+        </Button>
+        <div className="mt-1 grid grid-cols-2">
+          <button onClick={onReturn} className="flex min-h-[44px] items-center justify-center gap-1.5 text-[13px] font-extrabold text-ink-soft">
+            <Undo2 size={16} /> Return to shops
+          </button>
+          <Link href={`/jobs/${job.id}/refused`} className="flex min-h-[44px] items-center justify-center gap-1.5 text-[13px] font-extrabold text-danger">
+            <Ban size={16} /> Customer refused
+          </Link>
+        </div>
+      </BottomBar>
+    </>
+  );
+}
+
+/* ── 4. take everything back to the shops ───────────────────────────── */
+
+function ReturnView({ job, onChange, onCancel, toast }: ViewProps & { onCancel?: () => void }) {
+  const stops = job.stops.filter((s) => s.status !== "MOVED" && s.status !== "DELIVERED");
+  const [ticked, setTicked] = useState<Record<string, boolean>>({});
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const done = stops.filter((s) => ticked[s.id]).length;
+  const all = stops.length > 0 && done === stops.length;
+  const max = job.proofRules?.maxAttempts ?? 2;
+  const refusal = job.refusal;
+
+  async function finish() {
+    setBusy(true);
+    setErr(null);
+    try {
+      await returnJob(job.id, { notes: `Returned to ${stops.map((s) => s.shop.name).join(", ")}` });
+      toast("Return recorded — thank you");
+      onChange();
+    } catch (e) {
+      setErr(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const title =
+    job.status === "CANCELLED"
+      ? "Refused — return everything to the shops"
+      : job.mustReturn
+        ? "No tries left — return everything to the shops"
+        : "Return everything to the shops";
+  const text =
+    job.status === "CANCELLED"
+      ? refusal?.fault === "shop"
+        ? "The customer refused because of the shop. Take every bag back — the shops check them."
+        : refusal?.feeCollected
+          ? `The customer refused. You took the ${money(refusal.feeCollected)} delivery fee — hand it in with your cash.`
+          : "The customer refused. Take every bag back so the shops can check them."
+      : job.mustReturn
+        ? `${job.attemptCount} of ${max} delivery tries failed. Every bag must go back to its shop.`
+        : "Every bag goes back to its shop. The office will be told.";
+
+  return (
+    <>
+      <Page bottom="bar">
+        <div className="rounded-[22px] bg-danger p-4 text-white">
+          <div className="flex items-start gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-white/20">
+              <Undo2 size={21} />
+            </div>
+            <div>
+              <p className="text-[17px] font-extrabold leading-snug">{title}</p>
+              <p className="mt-1 text-[12.5px] leading-snug text-white/85">{text}</p>
+            </div>
+          </div>
+        </div>
+
+        <Card className="flex items-center gap-3 py-3.5">
+          <RotateCcw size={18} className="text-ink-soft" />
+          <span className="flex-1 text-[13.5px] font-extrabold text-ink">Return progress</span>
+          <Pill tone={all ? "brand" : "muted"}>
+            {done} of {stops.length} shops returned
+          </Pill>
+        </Card>
+
+        <Label right={<span className="text-[11px] font-bold text-ink-faint">Tick each shop when they have their bag</span>}>Shops</Label>
+        {stops.map((s) => (
+          <Card key={s.id} className={ticked[s.id] ? "ring-2 ring-brand/30" : ""}>
+            <button onClick={() => setTicked((t) => ({ ...t, [s.id]: !t[s.id] }))} className="flex w-full items-start gap-3 text-left">
+              <span className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-lg border-2 ${ticked[s.id] ? "border-brand bg-brand text-white" : "border-ink-faint/50"}`}>
+                {ticked[s.id] && <Check size={14} strokeWidth={3} />}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-[16px] font-extrabold text-ink">{s.shop.name}</span>
+                  <Pill tone={ticked[s.id] ? "brand" : "accent"}>{ticked[s.id] ? "Returned" : "To return"}</Pill>
+                </div>
+                <p className="text-[12px] text-ink-muted">{s.shop.location ?? "No address on file"}</p>
               </div>
+            </button>
+            <div className="mt-3 flex items-center gap-2 rounded-xl bg-surface-sunken px-3 py-2.5 text-[12px] text-ink-soft">
+              <Store size={14} className="shrink-0" />
+              <span className="truncate">{itemsLine(s)}</span>
+              <span className="ml-auto shrink-0 text-[11px] font-bold text-ink-faint">{s.orderNumber}</span>
+            </div>
+            <div className="mt-3">
+              <CallNav phone={s.shop.phone} place={[s.shop.name, s.shop.location]} callLabel="Call shop" size="sm" primary="call" />
+            </div>
+          </Card>
+        ))}
+
+        <div className="flex items-start gap-3 rounded-[22px] bg-accent-light/70 p-4">
+          <AlertTriangle size={18} className="mt-0.5 shrink-0 text-accent-tint" />
+          <p className="text-[12.5px] leading-snug text-accent-deep">
+            Give each bag to the shop by hand and let them check it. Don&apos;t leave bags with anyone else.
+          </p>
+        </div>
+        <InlineError message={err} />
+      </Page>
+      <BottomBar>
+        <Button onClick={finish} loading={busy} disabled={!all} icon={CheckCircle2} className="w-full">
+          {all ? "I returned everything" : `Tick ${stops.length - done} more shop${stops.length - done === 1 ? "" : "s"}`}
+        </Button>
+        {onCancel ? (
+          <button onClick={onCancel} className="mt-1 min-h-[44px] w-full text-[13px] font-bold text-ink-muted">
+            Back — I&apos;ll try again instead
+          </button>
+        ) : OFFICE_PHONE ? (
+          <a href={telHref(OFFICE_PHONE)} className="mt-1 flex min-h-[44px] items-center justify-center gap-1.5 text-[13px] font-bold text-ink-muted">
+            <Headphones size={15} /> A problem? Call the office
+          </a>
+        ) : (
+          <div className="h-2" />
+        )}
+      </BottomBar>
+    </>
+  );
+}
+
+/* ── 5. finished ────────────────────────────────────────────────────── */
+
+function DoneView({ job }: { job: JobDetail }) {
+  const delivered = job.status === "DELIVERED";
+  const refusedStops = job.stops.filter((s) => s.status === "REFUSED");
+  const at = job.timestamps.deliveredAt ?? job.timestamps.returnedAt ?? job.timestamps.cancelledAt;
+  return (
+    <Page bottom="none">
+      <Card className="flex flex-col items-center py-6 text-center">
+        <div className={`flex h-16 w-16 items-center justify-center rounded-full ${delivered ? "bg-brand text-white" : "bg-surface-sunken text-ink-muted"}`}>
+          {delivered ? <CheckCircle2 size={30} /> : <Undo2 size={28} />}
+        </div>
+        <p className="mt-3 text-[20px] font-extrabold text-ink">{delivered ? "Delivered" : job.status === "RETURNED" ? "Returned to the shops" : job.statusLabel}</p>
+        <p className="text-[12.5px] text-ink-muted">
+          {job.customer.name} · {dateTime(at)}
+        </p>
+      </Card>
+
+      <Card>
+        <Label className="mb-2">Summary</Label>
+        <div className="flex flex-col gap-2">
+          {job.refusal && (
+            <div className="flex items-center justify-between text-[13px]">
+              <span className="text-ink-muted">Refused at the door</span>
+              <span className="font-bold text-ink">{job.refusal.fault === "shop" ? "Shop's fault" : "Customer's choice"}</span>
             </div>
           )}
+          {job.refusal && job.refusal.feeCollected > 0 && (
+            <div className="flex items-center justify-between text-[13px]">
+              <span className="text-ink-muted">Delivery fee you took</span>
+              <span className="font-bold text-ink">{money(job.refusal.feeCollected)}</span>
+            </div>
+          )}
+          <div className="flex items-center justify-between text-[13px]">
+            <span className="text-ink-muted">You earned</span>
+            <span className="font-extrabold text-brand-tint">{(job.driverPay ?? 0) > 0 ? `+${money(job.driverPay)}` : "—"}</span>
+          </div>
+          <div className="flex items-center justify-between text-[13px]">
+            <span className="text-ink-muted">Shops</span>
+            <span className="font-bold text-ink">{job.stops.filter((s) => s.status !== "MOVED").length}</span>
+          </div>
         </div>
       </Card>
 
-      {/* ══ WHAT TO DO NEXT ══ */}
-      {!finished && (
-        <div className="flex flex-col gap-2.5 pb-2">
-          {collecting && (
-            <>
-              <Button
-                disabled={left > 0 || busy}
-                loading={busy}
-                onClick={() => run(() => startJob(job.id), false)}
-              >
-                <Truck className="h-4 w-4" />
-                {left > 0 ? `Collect ${left} more shop${left === 1 ? "" : "s"} first` : "I have everything — on my way"}
-              </Button>
-              {left > 0 && (
-                <p className="px-2 text-center text-[11.5px] leading-[1.6] text-ink-faint">
-                  Setting off without a shop&apos;s bag means going back for it. Tick them all first.
-                </p>
-              )}
-            </>
-          )}
-
-          {travelling && (
-            <>
-              <Button onClick={() => setSheet("deliver")}>
-                <CheckCircle2 className="h-4 w-4" />
-                I&apos;m at the customer
-              </Button>
-              <Button tone="secondary" onClick={() => setSheet("fail")}>
-                <XCircle className="h-4 w-4" />
-                Couldn&apos;t deliver
-              </Button>
-              <Button tone="danger" onClick={() => setSheet("cancel")}>
-                <Ban className="h-4 w-4" />
-                Customer refused everything
-              </Button>
-            </>
-          )}
-
-          {failedNow && (
-            <>
-              <Button onClick={() => run(() => startJob(job.id), false)} loading={busy}>
-                <Truck className="h-4 w-4" />
-                Try again
-              </Button>
-              <Button tone="danger" onClick={() => setSheet("return")}>
-                <RotateCcw className="h-4 w-4" />
-                Take it back to the shops
-              </Button>
-            </>
-          )}
+      {refusedStops.length > 0 && (
+        <div className="flex items-start gap-3 rounded-[22px] bg-accent-light p-4">
+          <AlertTriangle size={18} className="mt-0.5 shrink-0 text-accent-tint" />
+          <p className="text-[12.5px] leading-snug text-accent-deep">
+            Take back to the shop: <b>{refusedStops.map((s) => s.shop.name).join(", ")}</b>. The customer refused {refusedStops.length === 1 ? "it" : "them"}.
+          </p>
         </div>
       )}
 
-      {finished && (
-        <Card className="mb-3">
-          <div className="flex items-center gap-2">
-            <CheckCircle2 className="h-5 w-5 shrink-0" style={{ color: style.fg }} />
-            <div>
-              <div className="text-[13.5px] font-extrabold text-ink">{style.label}</div>
-              <div className="text-[12px] text-ink-muted">
-                {dateTime(
-                  job.timestamps.deliveredAt ??
-                    job.timestamps.cancelledAt ??
-                    job.timestamps.returnedAt ??
-                    job.updatedAt
-                )}
+      <Card>
+        <Label className="mb-2">Shops</Label>
+        <div className="flex flex-col gap-2">
+          {job.stops
+            .filter((s) => s.status !== "MOVED")
+            .map((s: JobStop) => (
+              <div key={s.id} className="flex items-center gap-3 rounded-2xl bg-surface-sunken px-3.5 py-3">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-[13.5px] font-extrabold text-ink">{s.shop.name}</p>
+                  <p className="truncate text-[11.5px] text-ink-muted">{itemsLine(s)}</p>
+                </div>
+                <Pill tone={s.status === "DELIVERED" ? "brand" : s.status === "REFUSED" ? "danger" : "muted"}>{s.statusLabel}</Pill>
               </div>
-            </div>
-          </div>
+            ))}
+        </div>
+      </Card>
+
+      {job.history.length > 0 && (
+        <Card>
+          <Label className="mb-3">What happened</Label>
+          <ol className="flex flex-col gap-3">
+            {job.history.map((h) => (
+              <li key={h.id} className="flex gap-3">
+                <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-brand" />
+                <div className="min-w-0">
+                  <p className="text-[13px] font-bold text-ink">{h.toLabel}</p>
+                  <p className="text-[11.5px] text-ink-muted">
+                    {dateTime(h.at)}
+                    {h.byName ? ` · ${h.byName}` : ""}
+                  </p>
+                  {h.notes && <p className="mt-0.5 text-[11.5px] text-ink-soft">{h.notes}</p>}
+                </div>
+              </li>
+            ))}
+          </ol>
         </Card>
       )}
 
-      {/* ══ 3. THE DOOR ══ */}
-      {sheet === "deliver" && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center">
-          <div className="absolute inset-0 bg-black/40" onClick={() => !busy && setSheet("none")} />
-          <div className="relative max-h-[90vh] w-full max-w-[480px] overflow-y-auto rounded-t-3xl bg-white p-5 pb-8">
-            <h3 className="mb-1 text-[17px] font-extrabold text-ink">What did they take?</h3>
-            <p className="mb-3 text-[12.5px] leading-[1.6] text-ink-muted">
-              Untick anything the customer hands back. Whatever you untick is{" "}
-              <strong className="text-[#C4362A]">cancelled and not paid for</strong>, and stays with
-              you to take back to the shop.
-            </p>
-
-            <div className="flex flex-col gap-2">
-              {carried.map((stop) => {
-                const taking = accepted.has(stop.id);
-                return (
-                  <button
-                    key={stop.id}
-                    onClick={() =>
-                      setAccepted((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(stop.id)) next.delete(stop.id);
-                        else next.add(stop.id);
-                        return next;
-                      })
-                    }
-                    className="flex items-center gap-3 rounded-2xl border-2 p-3 text-left transition-colors"
-                    style={{
-                      borderColor: taking ? "#2C6B44" : "#F4C7C2",
-                      background: taking ? "#F7FCF9" : "#FFF6F5",
-                    }}
-                  >
-                    <span
-                      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl"
-                      style={{ background: taking ? "#2C6B44" : "#FDEAEA" }}
-                    >
-                      {taking ? (
-                        <Check className="h-[18px] w-[18px] text-white" />
-                      ) : (
-                        <XCircle className="h-[18px] w-[18px] text-[#C4362A]" />
-                      )}
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <div className="text-[13.5px] font-extrabold text-ink">{stop.shop.name}</div>
-                      <div className="text-[11.5px] text-ink-muted">
-                        {stop.itemCount} item{stop.itemCount === 1 ? "" : "s"} ·{" "}
-                        {money(stop.money.total)}
-                        {stop.money.isPaid ? " · already paid" : ""}
-                      </div>
-                    </div>
-                    <span
-                      className="shrink-0 text-[11px] font-extrabold"
-                      style={{ color: taking ? "#2C6B44" : "#C4362A" }}
-                    >
-                      {taking ? "TAKING" : "REFUSED"}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-
-            {refusedCount > 0 && (
-              <div className="mt-3">
-                <label className="text-[12px] font-bold text-ink">
-                  Why did they refuse {refusedCount === 1 ? "it" : "them"}?
-                </label>
-                <select
-                  value={refusedReason}
-                  onChange={(e) => setRefusedReason(e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-line bg-white px-3 py-3 text-[13px] text-ink"
-                >
-                  <option value="">Choose a reason…</option>
-                  {JOB_CANCEL_REASONS.map((r) => (
-                    <option key={r.value} value={r.label}>
-                      {r.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
-
-            {/* The cash, worked out from what they are actually taking. */}
-            <div className="mt-4 rounded-2xl p-4" style={{ background: cashDue > 0 ? "#FFF6EC" : "#EAF7EE" }}>
-              {cashDue > 0 ? (
-                <>
-                  <div className="text-[11px] font-extrabold uppercase tracking-wide text-accent">
-                    Take from the customer
-                  </div>
-                  <div className="text-[30px] font-extrabold leading-none text-ink">
-                    {money(cashDue)}
-                  </div>
-                  {refusedCount > 0 && (
-                    <div className="mt-1 text-[11.5px] font-semibold text-[#8A5A2B]">
-                      Less than the full basket — they are not paying for what they refused.
-                    </div>
-                  )}
-                  <button
-                    onClick={() => setCashConfirmed((v) => !v)}
-                    className="mt-3 flex w-full items-center gap-2.5 rounded-xl bg-white p-3 text-left"
-                  >
-                    <span
-                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border-2"
-                      style={{
-                        borderColor: cashConfirmed ? "#2C6B44" : "#D6DAE2",
-                        background: cashConfirmed ? "#2C6B44" : "#FFF",
-                      }}
-                    >
-                      {cashConfirmed && <Check className="h-3.5 w-3.5 text-white" />}
-                    </span>
-                    <span className="text-[12.5px] font-bold text-ink">
-                      I have the {money(cashDue)} in my hand
-                    </span>
-                  </button>
-                </>
-              ) : (
-                <div className="text-center">
-                  <div className="text-[11px] font-extrabold uppercase tracking-wide text-[#2C6B44]">
-                    Nothing to collect
-                  </div>
-                  <div className="mt-0.5 text-[12.5px] font-semibold text-ink">
-                    This part is already paid. Take no money.
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="mt-4 flex flex-col gap-2.5">
-              <Button
-                loading={busy}
-                disabled={
-                  busy ||
-                  takingNow.length === 0 ||
-                  (cashDue > 0 && !cashConfirmed) ||
-                  (refusedCount > 0 && !refusedReason)
-                }
-                onClick={() =>
-                  run(() =>
-                    completeJob(job.id, {
-                      acceptedStopIds: Array.from(accepted),
-                      cashCollected: cashDue > 0 ? cashConfirmed : undefined,
-                      refusedReason: refusedReason || undefined,
-                    })
-                  )
-                }
-              >
-                <CheckCircle2 className="h-4 w-4" />
-                {takingNow.length === carried.length
-                  ? "Delivered — finish the trip"
-                  : `Delivered ${takingNow.length} of ${carried.length} shops`}
-              </Button>
-              {takingNow.length === 0 && (
-                <p className="px-2 text-center text-[11.5px] leading-[1.6] text-[#C4362A]">
-                  They took nothing. Go back and use “Customer refused everything” instead.
-                </p>
-              )}
-              <Button tone="ghost" onClick={() => setSheet("none")} disabled={busy}>
-                Cancel
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Couldn't deliver ── */}
-      <ConfirmSheet
-        open={sheet === "fail"}
-        title="Couldn't deliver"
-        tone="danger"
-        loading={busy}
-        confirmLabel="Report it"
-        onCancel={() => setSheet("none")}
-        onConfirm={() => run(() => failJob(job.id, { reason, notes: notes || undefined }))}
-        body={
-          <div className="flex flex-col gap-2">
-            <p>
-              Everything stays with you and nothing is marked delivered. You can try again later.
-            </p>
-            <select
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              className="w-full rounded-xl border border-line bg-white px-3 py-3 text-[13px] text-ink"
-            >
-              <option value="">Choose a reason…</option>
-              {JOB_FAILURE_REASONS.map((r) => (
-                <option key={r.value} value={r.value}>
-                  {r.label}
-                </option>
-              ))}
-            </select>
-            <textarea
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              rows={2}
-              placeholder="Anything the office should know (optional)"
-              className="w-full rounded-xl border border-line bg-white px-3 py-2.5 text-[13px] text-ink"
-            />
-          </div>
-        }
-      />
-
-      {/* ── Customer refused everything ── */}
-      <ConfirmSheet
-        open={sheet === "cancel"}
-        title="Customer refused everything"
-        tone="danger"
-        loading={busy}
-        confirmLabel="Yes — the sale is off"
-        onCancel={() => setSheet("none")}
-        onConfirm={() => run(() => cancelJob(job.id, { reason, notes: notes || undefined }))}
-        body={
-          <div className="flex flex-col gap-2">
-            <p className="font-semibold text-[#C4362A]">
-              This ends the whole basket. Nothing is delivered, nothing is paid, and you take it all
-              back to the shops.
-            </p>
-            <p>If they only refused part of it, go back and use “I&apos;m at the customer” instead.</p>
-            <select
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              className="w-full rounded-xl border border-line bg-white px-3 py-3 text-[13px] text-ink"
-            >
-              <option value="">Choose a reason…</option>
-              {JOB_CANCEL_REASONS.map((r) => (
-                <option key={r.value} value={r.value}>
-                  {r.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        }
-      />
-
-      {/* ── Returned ── */}
-      <ConfirmSheet
-        open={sheet === "return"}
-        title="Back with the shops?"
-        tone="danger"
-        loading={busy}
-        confirmLabel="Yes, I gave it back"
-        onCancel={() => setSheet("none")}
-        onConfirm={() => run(() => returnJob(job.id, { notes: notes || undefined }))}
-        body="Only confirm this once the goods are physically back with the shops. The office sees this trip as closed afterwards."
-      />
-
-      {toast && (
-        <Toast tone={toast.tone} message={toast.message} onClose={() => setToast(null)} />
-      )}
-    </>
+      <Button href="/jobs" variant="outline" className="w-full">
+        Back to my trips
+      </Button>
+    </Page>
   );
 }

@@ -1,153 +1,215 @@
-// app/(app)/jobs/page.tsx
+// app/(app)/jobs/page.tsx — My Trips.
 //
-// My Trips — every basket in this driver's hands.
-//
-// One card per TRIP, not per parcel. A customer who bought from three
-// shops is ONE card here: one address, one amount to collect, three shops
-// to call at on the way. Before trips existed, the same customer showed up
-// as three separate jobs and could even be given to three drivers.
-//
-// The card says what to do next in words, because a driver reads this
-// while walking: "Collect 2 more shops" or "Go to the customer".
+// "Now" is everything still in your hands (collect, on the way, failed,
+// refused-and-going-back). "Done today" is what you finished today.
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
-import { ChevronRight, MapPin, Package, Store, Truck } from "lucide-react";
-import { useAsync } from "@/lib/deliveries";
-import { getJobs, jobStyle, type Job } from "@/lib/jobs";
-import { Card, EmptyState, ErrorState, PageHeader, SkeletonList, money } from "@/components/ui";
+import { useMemo, useState } from "react";
+import { AlertTriangle, ArrowRight, CheckCircle2, ClipboardList, MapPin, Navigation, PackageCheck, Store, Truck, Undo2 } from "lucide-react";
+import { useAsync } from "@/lib/driver";
+import { finishedAt, getJobHistory, getLiveJobs, jobStyle, nextStep, type Job } from "@/lib/jobs";
+import { isToday, mapsHref, money, telHref, timeOf } from "@/lib/format";
+import { Button, Card, EmptyState, ErrorState, Page, Pill, Skeleton, StatusPill, TopBar } from "@/components/ui";
 
-/** What the driver should do next on this trip, in plain words. */
-function nextThing(job: Job) {
-  if (job.status === "ASSIGNED") {
-    const left = job.progress.shopCount - job.progress.collectedCount;
-    return left > 0
-      ? `Collect ${left} more shop${left === 1 ? "" : "s"}`
-      : "Everything collected — set off";
-  }
-  if (job.status === "ON_THE_WAY") return "Go to the customer";
-  if (job.status === "FAILED") return "Try again, or take it back";
-  return jobStyle(job.status).label;
+async function loadTrips() {
+  const [live, history] = await Promise.all([getLiveJobs(), getJobHistory()]);
+  const done = history
+    .filter((j) => (j.status === "DELIVERED" || j.status === "RETURNED") && isToday(finishedAt(j)))
+    .sort((a, b) => String(finishedAt(b)).localeCompare(String(finishedAt(a))));
+  return { live, done };
 }
 
-function JobCard({ job }: { job: Job }) {
-  const style = jobStyle(job.status);
-  return (
-    <Link href={`/jobs/${job.id}`} className="block">
-      <Card className="active:bg-surface-sunken">
-        <div className="mb-2 flex items-center justify-between gap-2">
-          <span className="text-[15px] font-extrabold text-ink">{job.jobNumber}</span>
-          <span
-            className="shrink-0 rounded-full px-2.5 py-1 text-[10.5px] font-extrabold"
-            style={{ background: style.bg, color: style.fg }}
-          >
-            {style.label}
-          </span>
-        </div>
-
-        <div className="text-[13.5px] font-bold text-ink">{job.customer.name}</div>
-        <div className="mt-0.5 flex items-start gap-1.5 text-[12.5px] text-ink-muted">
-          <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <span>{job.dropLocation || job.customer.address || "Address on the trip page"}</span>
-        </div>
-
-        {/* How many shops, and how far through them */}
-        <div className="mt-2.5 flex items-center gap-1.5 rounded-xl bg-surface-sunken px-3 py-2">
-          <Store className="h-3.5 w-3.5 shrink-0 text-ink-faint" />
-          <span className="text-[12.5px] font-bold text-ink">
-            {job.progress.shopCount} shop{job.progress.shopCount === 1 ? "" : "s"}
-          </span>
-          {job.status === "ASSIGNED" && (
-            <span className="text-[12px] text-ink-muted">
-              · {job.progress.collectedCount} of {job.progress.shopCount} in your bag
-            </span>
-          )}
-          <span className="ml-auto text-[12px] font-bold text-brand">{nextThing(job)}</span>
-        </div>
-
-        <div className="mt-2.5 flex items-end justify-between gap-2">
-          <div>
-            {job.money.amountToCollect > 0 ? (
-              <>
-                <div className="text-[10.5px] font-bold uppercase tracking-wide text-accent">
-                  Collect at the door
-                </div>
-                <div className="text-[19px] font-extrabold leading-tight text-ink">
-                  {money(job.money.amountToCollect)}
-                </div>
-                <div className="text-[11px] text-ink-faint">
-                  incl. {money(job.money.deliveryFee)} delivery
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="text-[10.5px] font-bold uppercase tracking-wide text-[#2C6B44]">
-                  Already paid
-                </div>
-                <div className="text-[12.5px] text-ink-muted">Nothing to collect</div>
-              </>
-            )}
-          </div>
-          <ChevronRight className="h-4 w-4 shrink-0 text-ink-faint" />
-        </div>
-      </Card>
-    </Link>
-  );
-}
-
-export default function JobsPage() {
-  const [tab, setTab] = useState<"live" | "done">("live");
-  const statuses = tab === "live" ? "ASSIGNED,ON_THE_WAY,FAILED" : "DELIVERED,CANCELLED,RETURNED";
-  const { data, loading, error, reload } = useAsync(() => getJobs(statuses), [statuses]);
+export default function TripsPage() {
+  const { data, loading, error, reload } = useAsync(loadTrips, []);
+  const [tab, setTab] = useState<"now" | "done">("now");
+  const earnedToday = useMemo(() => (data?.done ?? []).reduce((t, j) => t + (j.driverPay ?? 0), 0), [data]);
 
   return (
     <>
-      <PageHeader
-        title="My Trips"
-        subtitle="One card per customer — however many shops it came from."
-      />
+      <TopBar title="My Trips" />
+      <Page>
+        {loading && !data ? (
+          <Skeleton rows={3} height={190} />
+        ) : error && !data ? (
+          <ErrorState message={error} onRetry={reload} />
+        ) : data ? (
+          <>
+            <Card className="flex items-center gap-3 py-3.5">
+              <div className="flex h-11 w-11 items-center justify-center rounded-full bg-brand-light text-brand">
+                <Truck size={20} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-[10.5px] font-extrabold uppercase tracking-[0.1em] text-ink-muted">In your hands</p>
+                <p className="text-[16px] font-extrabold text-ink">
+                  {data.live.length} active trip{data.live.length === 1 ? "" : "s"}
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="text-[10.5px] font-bold text-ink-muted">Done today</p>
+                <p className="text-[16px] font-extrabold text-ink">{data.done.length}</p>
+              </div>
+            </Card>
 
-      <div className="mb-4 flex gap-2">
-        {(
-          [
-            ["live", "In My Hands"],
-            ["done", "Finished"],
-          ] as ["live" | "done", string][]
-        ).map(([key, label]) => (
-          <button
-            key={key}
-            onClick={() => setTab(key)}
-            className={`flex-1 rounded-xl px-4 py-2.5 text-[12.5px] font-bold transition-colors ${
-              tab === key ? "bg-brand text-white" : "border border-line bg-white text-ink-soft"
-            }`}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
+            <div className="grid grid-cols-2 gap-1.5 rounded-2xl bg-white p-1.5 shadow-card">
+              <button
+                onClick={() => setTab("now")}
+                className={`flex min-h-[46px] items-center justify-center gap-2 rounded-xl text-[13.5px] font-extrabold ${tab === "now" ? "bg-brand text-white" : "text-ink-muted"}`}
+              >
+                <Navigation size={15} /> Now ({data.live.length})
+              </button>
+              <button
+                onClick={() => setTab("done")}
+                className={`flex min-h-[46px] items-center justify-center gap-2 rounded-xl text-[13.5px] font-extrabold ${tab === "done" ? "bg-brand text-white" : "text-ink-muted"}`}
+              >
+                <CheckCircle2 size={15} /> Done today ({data.done.length})
+              </button>
+            </div>
 
-      {loading ? (
-        <SkeletonList rows={3} />
-      ) : error ? (
-        <ErrorState message={error} onRetry={reload} />
-      ) : !data || data.length === 0 ? (
-        <EmptyState
-          title={tab === "live" ? "Nothing in your hands" : "No finished trips yet"}
-          hint={
-            tab === "live"
-              ? "The office gives you a whole basket at once — every shop for one customer, in one trip."
-              : "Trips you have finished will show up here."
-          }
-          icon={tab === "live" ? <Truck className="h-7 w-7 text-ink-faint" /> : <Package className="h-7 w-7 text-ink-faint" />}
-        />
-      ) : (
-        <div className="flex flex-col gap-3">
-          {data.map((job) => (
-            <JobCard key={job.id} job={job} />
-          ))}
-        </div>
-      )}
+            {tab === "now" ? (
+              data.live.length === 0 ? (
+                <EmptyState icon={ClipboardList} title="No trips right now" text="When the office gives you a trip it shows here. Stay online on the Home tab." />
+              ) : (
+                data.live.map((j) => <TripCard key={j.id} job={j} />)
+              )
+            ) : data.done.length === 0 ? (
+              <EmptyState icon={PackageCheck} title="Nothing finished yet today" text="Delivered and returned trips from today show here." />
+            ) : (
+              <Card>
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-full bg-brand-light text-brand">
+                    <CheckCircle2 size={19} />
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-[15px] font-extrabold text-ink">
+                      Done today ({data.done.length})
+                    </p>
+                    <p className="text-[11.5px] font-semibold text-brand-tint">+{money(earnedToday)} earned on these trips</p>
+                  </div>
+                </div>
+                <div className="mt-3 flex flex-col gap-2">
+                  {data.done.map((j) => (
+                    <Link key={j.id} href={`/jobs/${j.id}`} className="flex items-center gap-3 rounded-2xl bg-surface-sunken px-3.5 py-3">
+                      {j.status === "DELIVERED" ? <CheckCircle2 size={18} className="text-brand-tint" /> : <Undo2 size={18} className="text-ink-muted" />}
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-[13.5px] font-extrabold text-ink">
+                          {j.jobNumber} · {j.customer.name}
+                        </p>
+                        <p className="truncate text-[11px] text-ink-muted">
+                          {timeOf(finishedAt(j))} · {j.status === "DELIVERED" ? "Delivered" : "Returned to the shops"}
+                        </p>
+                      </div>
+                      <span className={`text-[15px] font-extrabold ${(j.driverPay ?? 0) > 0 ? "text-brand-tint" : "text-ink-faint"}`}>
+                        {(j.driverPay ?? 0) > 0 ? `+${money(j.driverPay)}` : "—"}
+                      </span>
+                    </Link>
+                  ))}
+                </div>
+              </Card>
+            )}
+          </>
+        ) : null}
+      </Page>
     </>
+  );
+}
+
+function TripCard({ job }: { job: Job }) {
+  const step = nextStep(job);
+  const stripe =
+    job.status === "ON_THE_WAY" ? "bg-accent" : job.status === "ASSIGNED" ? "bg-violet" : "bg-danger";
+  const cash = job.money.amountToCollect;
+  const shops = job.shopNames ?? [];
+  const goBack = job.status === "CANCELLED" || (job.status === "FAILED" && job.mustReturn);
+
+  return (
+    <div className="overflow-hidden rounded-[22px] bg-white shadow-card">
+      <div className={`h-1.5 ${stripe}`} />
+      <div className="p-4">
+        {job.isIntercity && (
+          <div className="mb-2.5 flex items-center justify-between">
+            <Pill tone="brand">
+              <MapPin size={11} /> BETWEEN CITIES{job.destinationCity ? ` → ${job.destinationCity}` : ""}
+            </Pill>
+          </div>
+        )}
+        <div className="flex items-center gap-2">
+          <Link href={`/jobs/${job.id}`} className="text-[19px] font-extrabold text-ink">
+            {job.jobNumber}
+          </Link>
+          {job.status === "FAILED" && (
+            <Pill tone="danger">
+              TRY {job.attemptCount} DONE
+            </Pill>
+          )}
+          <span className="ml-auto">
+            <StatusPill style={jobStyle(job.status)} />
+          </span>
+        </div>
+        <p className="mt-2 text-[16px] font-extrabold text-ink">{job.customer.name}</p>
+        <p className="mt-0.5 flex items-start gap-1.5 text-[12.5px] text-ink-muted">
+          <MapPin size={14} className="mt-0.5 shrink-0" />
+          <span className="line-clamp-2">
+            <b className="font-bold text-ink-soft">{job.customer.area || job.customer.district || job.customer.address || "No area given"}</b>
+            {job.customer.landmark ? ` · ${job.customer.landmark}` : ""}
+          </span>
+        </p>
+        {shops.length > 0 && (
+          <div className="mt-2.5 flex flex-wrap gap-1.5">
+            {shops.map((s) => (
+              <span key={s} className="inline-flex items-center gap-1 rounded-lg bg-surface-sunken px-2 py-1 text-[11px] font-bold text-ink-soft">
+                <Store size={12} /> {s}
+              </span>
+            ))}
+          </div>
+        )}
+
+        <div className="mt-3 flex items-center gap-3 border-t border-line pt-3">
+          <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${goBack ? "bg-danger-light text-danger" : "bg-surface-sunken text-ink-soft"}`}>
+            {goBack ? <AlertTriangle size={16} /> : <Navigation size={16} />}
+          </div>
+          <p className={`min-w-0 flex-1 text-[13.5px] font-extrabold leading-tight ${goBack ? "text-danger" : "text-ink"}`}>{step.label}</p>
+          {goBack ? (
+            <Pill tone="muted">NO CASH</Pill>
+          ) : cash > 0 ? (
+            <span className="rounded-xl bg-accent-light px-2.5 py-1.5 text-[11px] font-extrabold text-accent-tint">
+              COD <span className="text-[15px]">{money(cash)}</span>
+            </span>
+          ) : (
+            <Pill tone="brand">PAID</Pill>
+          )}
+        </div>
+
+        <div className="mt-3">
+          {job.status === "ON_THE_WAY" ? (
+            <div className="grid grid-cols-2 gap-2.5">
+              <Button href={telHref(job.customer.phone)} variant="secondary" size="md" disabled={!job.customer.phone}>
+                Call customer
+              </Button>
+              <Button href={`/jobs/${job.id}`} size="md" iconRight={ArrowRight}>
+                Open trip
+              </Button>
+            </div>
+          ) : goBack ? (
+            <Button href={`/jobs/${job.id}`} variant="danger-soft" size="md" icon={Undo2} className="w-full">
+              Return to the shops
+            </Button>
+          ) : job.status === "FAILED" ? (
+            <div className="grid grid-cols-2 gap-2.5">
+              <Button href={mapsHref(job.customer.address, job.customer.area, job.customer.landmark)} variant="secondary" size="md">
+                Navigate
+              </Button>
+              <Button href={`/jobs/${job.id}`} size="md" iconRight={ArrowRight}>
+                Open trip
+              </Button>
+            </div>
+          ) : (
+            <Button href={`/jobs/${job.id}`} variant="secondary" size="md" icon={Store} className="w-full">
+              Collect from the shops
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }

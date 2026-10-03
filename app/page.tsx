@@ -4,12 +4,12 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { getToken } from "@/lib/api";
-import { LoadingState } from "@/components/ui";
+import { FullLoader } from "@/components/ui";
 
 export default function IndexPage() {
   const router = useRouter();
   useEffect(() => {
     router.replace(getToken() ? "/dashboard" : "/login");
   }, [router]);
-  return <LoadingState label="Opening Bakhaar Delivery…" />;
+  return <FullLoader label="Opening Bakhaar Delivery…" />;
 }

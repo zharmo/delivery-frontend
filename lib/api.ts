@@ -36,6 +36,32 @@ export function clearToken() {
   }
 }
 
+const PAUSED_KEY = "bakhaar_delivery_paused";
+
+/** The office paused this account (remembered so the login page can explain). */
+export function markPaused() {
+  try {
+    window.localStorage.setItem(PAUSED_KEY, "1");
+  } catch {
+    /* ignore */
+  }
+}
+export function clearPaused() {
+  try {
+    window.localStorage.removeItem(PAUSED_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+export function isPaused() {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(PAUSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 /** Thrown for any non-2xx response, carrying the backend's own message. */
 export class ApiError extends Error {
   status: number;
@@ -86,6 +112,13 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
       clearToken();
       if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
         window.location.href = "/login";
+      }
+    }
+    // 403 "suspended": the office paused this driver — show the paused screen.
+    if (res.status === 403 && /suspended/i.test(body.message ?? "")) {
+      markPaused();
+      if (typeof window !== "undefined" && !window.location.pathname.startsWith("/paused")) {
+        window.location.href = "/paused";
       }
     }
     throw new ApiError(body.message || `Request failed (${res.status})`, res.status);

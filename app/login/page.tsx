@@ -1,154 +1,147 @@
 // app/login/page.tsx
 //
-// Delivery staff sign-in. Hits /delivery/auth/login, which only accepts
-// accounts with the delivery role — a seller or customer signing in here is
-// refused by the backend, not by a check in this page.
+// Sign in with the email and password the office gave you.
+// A paused account goes to the "Your account is paused" screen.
 "use client";
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Eye, EyeOff, Loader2, Truck } from "lucide-react";
-import { getToken } from "@/lib/api";
-import { login } from "@/lib/deliveries";
+import { AlertCircle, ArrowRight, Eye, EyeOff, Headphones, Lock, Mail, ShieldCheck, Truck, X } from "lucide-react";
+import { ApiError, getToken, markPaused } from "@/lib/api";
+import { login } from "@/lib/driver";
+import { OFFICE_PHONE } from "@/lib/office";
+import { telHref } from "@/lib/format";
+import { Button, INPUT } from "@/components/ui";
 
 export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
-  const [remember, setRemember] = useState(true);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [show, setShow] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<{ title: string; text: string } | null>(null);
 
-  // Already signed in? Don't make them do it again.
   useEffect(() => {
     if (getToken()) router.replace("/dashboard");
   }, [router]);
 
-  // The email is remembered between shifts; the password never is.
-  useEffect(() => {
-    try {
-      const saved = window.localStorage.getItem("bakhaar_delivery_email");
-      if (saved) setEmail(saved);
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  async function submit(e?: React.FormEvent) {
+    e?.preventDefault();
+    setError(null);
     if (!email.trim() || !password) {
-      setError("Enter your email and password");
+      setError({ title: "Enter your email and password.", text: "Both are on the paper the office gave you." });
       return;
     }
-    setLoading(true);
-    setError(null);
+    setBusy(true);
     try {
       await login(email.trim(), password);
-      try {
-        if (remember) window.localStorage.setItem("bakhaar_delivery_email", email.trim());
-        else window.localStorage.removeItem("bakhaar_delivery_email");
-      } catch {
-        /* ignore */
-      }
       router.replace("/dashboard");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not sign in");
-      setLoading(false);
+      if (err instanceof ApiError && err.status === 403 && /suspend/i.test(err.message)) {
+        markPaused();
+        router.replace("/paused");
+        return;
+      }
+      if (err instanceof ApiError && (err.status === 401 || err.status === 400)) {
+        setError({ title: "Wrong email or password. Try again.", text: "Check them carefully, or call the office if you are locked out." });
+      } else {
+        setError({ title: "Couldn't sign in.", text: err instanceof Error ? err.message : "Something went wrong — try again." });
+      }
+    } finally {
+      setBusy(false);
     }
   }
 
   return (
-    <div className="flex min-h-screen flex-col justify-center bg-surface-page px-5 py-10">
-      <div className="mx-auto w-full max-w-[400px]">
-        {/* Brand */}
-        <div className="mb-7 flex flex-col items-center text-center">
-          <div className="mb-3 flex h-16 w-16 items-center justify-center rounded-3xl bg-brand">
-            <Truck className="h-7 w-7 text-white" />
+    <form onSubmit={submit} className="flex min-h-screen flex-col px-4 pb-32 pt-10">
+      <div className="flex flex-col items-center text-center">
+        <div className="flex h-16 w-16 items-center justify-center rounded-[20px] bg-white shadow-card">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-brand text-white">
+            <Truck size={24} />
           </div>
-          <h1 className="text-[24px] font-extrabold leading-tight text-ink">Bakhaar Delivery</h1>
-          <p className="mt-1 text-[13px] text-ink-muted">Sign in to see today&apos;s deliveries.</p>
         </div>
+        <span className="mt-4 inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[10.5px] font-extrabold tracking-[0.1em] text-ink-soft shadow-card">
+          <Truck size={13} /> DRIVER APP
+        </span>
+        <h1 className="mt-3 text-[26px] font-extrabold leading-tight text-ink">Bakhaar Delivery</h1>
+        <p className="mt-1 text-[12.5px] font-medium text-ink-muted">Deliveries and return pickups · Hargeisa</p>
+      </div>
 
-        <form onSubmit={handleSubmit} className="rounded-3xl bg-white p-5 shadow-[0_4px_14px_rgba(16,24,32,0.05)]">
-          <label className="mb-1.5 block text-[12.5px] font-bold text-ink">Email</label>
-          <input
-            type="email"
-            inputMode="email"
-            autoCapitalize="none"
-            autoComplete="username"
-            value={email}
-            onChange={(e) => {
-              setEmail(e.target.value);
-              if (error) setError(null);
-            }}
-            placeholder="driver@bakhaar.so"
-            className="mb-4 w-full rounded-xl border border-line bg-surface-sunken px-4 py-3.5 text-[15px] text-ink placeholder:text-ink-faint focus:border-brand focus:outline-none"
-          />
+      <div className="mt-7 rounded-[24px] bg-white p-5 shadow-card">
+        <h2 className="text-[19px] font-extrabold text-ink">Sign in to start your shift</h2>
+        <p className="mt-1 text-[12.5px] text-ink-muted">Use the email and password the office gave you.</p>
 
-          <label className="mb-1.5 block text-[12.5px] font-bold text-ink">Password</label>
-          <div className="relative mb-4">
-            <input
-              type={showPassword ? "text" : "password"}
-              autoComplete="current-password"
-              value={password}
-              onChange={(e) => {
-                setPassword(e.target.value);
-                if (error) setError(null);
-              }}
-              placeholder="Your password"
-              className="w-full rounded-xl border border-line bg-surface-sunken px-4 py-3.5 pr-12 text-[15px] text-ink placeholder:text-ink-faint focus:border-brand focus:outline-none"
-            />
-            <button
-              type="button"
-              onClick={() => setShowPassword((v) => !v)}
-              className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5"
-              aria-label={showPassword ? "Hide password" : "Show password"}
-            >
-              {showPassword ? (
-                <EyeOff className="h-4 w-4 text-ink-faint" />
-              ) : (
-                <Eye className="h-4 w-4 text-ink-faint" />
-              )}
+        {error && (
+          <div className="mt-4 flex items-start gap-3 rounded-2xl bg-danger-light p-3.5">
+            <AlertCircle size={20} className="mt-0.5 shrink-0 fill-danger text-white" />
+            <div className="min-w-0 flex-1">
+              <p className="text-[13.5px] font-extrabold leading-snug text-danger-deep">{error.title}</p>
+              <p className="mt-0.5 text-[11.5px] leading-snug text-danger">{error.text}</p>
+            </div>
+            <button type="button" onClick={() => setError(null)} aria-label="Close" className="text-danger">
+              <X size={17} />
             </button>
           </div>
+        )}
 
-          <label className="mb-4 flex items-center gap-2.5">
-            <input
-              type="checkbox"
-              checked={remember}
-              onChange={(e) => setRemember(e.target.checked)}
-              className="h-4 w-4 accent-[#0E3B2A]"
-            />
-            <span className="text-[12.5px] text-ink-soft">Remember my email on this phone</span>
-          </label>
+        <label className="mt-5 flex items-center justify-between text-[12.5px] font-extrabold text-ink">
+          Email <span className="text-[11px] font-semibold text-ink-faint">Office account</span>
+        </label>
+        <div className="relative mt-2">
+          <Mail size={17} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-ink-muted" />
+          <input
+            className={`${INPUT} pl-11`}
+            type="email"
+            inputMode="email"
+            autoComplete="username"
+            placeholder="you@bakhaar.so"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+        </div>
 
-          {error && (
-            <div className="mb-4 rounded-xl bg-[#FDEAEA] p-3">
-              <p className="text-[12.5px] font-semibold leading-[1.5] text-[#C4362A]">{error}</p>
-            </div>
-          )}
-
-          <button
-            type="submit"
-            disabled={loading}
-            className="flex min-h-[56px] w-full items-center justify-center gap-2 rounded-2xl bg-brand text-[15px] font-bold text-white disabled:opacity-60"
-          >
-            {loading && <Loader2 className="h-4 w-4 animate-spin" />}
-            {loading ? "Signing in…" : "Sign In"}
+        <label className="mt-4 block text-[12.5px] font-extrabold text-ink">Password</label>
+        <div className="relative mt-2">
+          <Lock size={17} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-ink-muted" />
+          <input
+            className={`${INPUT} pl-11 pr-12`}
+            type={show ? "text" : "password"}
+            autoComplete="current-password"
+            placeholder="Your password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          <button type="button" onClick={() => setShow((s) => !s)} aria-label={show ? "Hide password" : "Show password"} className="absolute right-3 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center text-ink-muted">
+            {show ? <EyeOff size={18} /> : <Eye size={18} />}
           </button>
+        </div>
 
-          {/* Honest about what exists: there is no password-reset email
-              service in this project, so the office resets it by hand. */}
-          <p className="mt-4 text-center text-[11.5px] leading-[1.6] text-ink-faint">
-            Forgot your password? Contact the Bakhaar office — they&apos;ll set a new one for you.
+        {OFFICE_PHONE ? (
+          <a href={telHref(OFFICE_PHONE)} className="mt-5 flex items-center justify-center gap-1.5 text-[12.5px] font-extrabold text-brand">
+            <Headphones size={15} /> Forgot password? Call the office
+          </a>
+        ) : (
+          <p className="mt-5 flex items-center justify-center gap-1.5 text-[12.5px] font-extrabold text-brand">
+            <Headphones size={15} /> Forgot password? Ask the office
           </p>
-        </form>
-
-        <p className="mt-5 text-center text-[11px] text-ink-faint">
-          For Bakhaar delivery staff only.
-        </p>
+        )}
       </div>
-    </div>
+
+      <div className="mt-3 flex items-start gap-3 rounded-[22px] bg-white p-4 shadow-card">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-brand-light text-brand">
+          <ShieldCheck size={19} />
+        </div>
+        <div>
+          <p className="text-[13px] font-extrabold text-ink">Before you leave</p>
+          <p className="mt-0.5 text-[11.5px] leading-snug text-ink-muted">Charge your phone and hand in yesterday&apos;s cash at the office.</p>
+        </div>
+      </div>
+
+      <div className="pb-safe fixed bottom-0 left-1/2 z-40 w-full max-w-[480px] -translate-x-1/2 bg-gradient-to-t from-surface-page via-surface-page to-transparent px-4 pt-6">
+        <Button type="submit" loading={busy} iconRight={ArrowRight} className="w-full">
+          Sign in
+        </Button>
+      </div>
+    </form>
   );
 }
