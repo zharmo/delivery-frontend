@@ -10,10 +10,11 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
-  AlertCircle, ArrowLeft, Bell, Check, CheckCircle2, Loader2, Navigation, PackageOpen, Phone, RefreshCw, Truck, User, X,
+  AlertCircle, ArrowLeft, Bell, Check, CheckCircle2, Loader2, Navigation, PackageOpen, Phone, RefreshCw, User, X,
 } from "lucide-react";
 import { initials, mapsHref, telHref } from "@/lib/format";
 import { useUnread } from "./useUnread";
+import LogoIcon from "@/components/LogoIcon";
 
 /* ── layout ─────────────────────────────────────────────────────────── */
 
@@ -27,9 +28,7 @@ export function TopBar({ title, kicker = "BAKHAAR" }: { title: string; kicker?: 
   const unread = useUnread();
   return (
     <header className="sticky top-0 z-30 flex items-center gap-3 bg-surface-page/95 px-4 pb-2 pt-4 backdrop-blur">
-      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-brand text-white">
-        <Truck size={19} />
-      </div>
+      <LogoIcon size={40} />
       <div className="min-w-0 flex-1">
         <div className="text-[10px] font-bold tracking-[0.12em] text-ink-faint">{kicker}</div>
         <h1 className="truncate text-[18px] font-extrabold leading-tight text-ink">{title}</h1>

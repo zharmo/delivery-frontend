@@ -18,7 +18,9 @@ export default function PasswordPage() {
   async function save() {
     setErr(null);
     if (!current) return setErr("Enter your current password");
-    if (next.length < 6) return setErr("The new password must be at least 6 characters");
+    if (next.length < 8 || !/[A-Za-z]/.test(next) || !/\d/.test(next)) {
+      return setErr("The new password must be at least 8 characters, with letters and numbers");
+    }
     if (next !== again) return setErr("The two new passwords are not the same");
     setBusy(true);
     try {
@@ -42,7 +44,7 @@ export default function PasswordPage() {
       <Page bottom="bar">
         <div className="flex items-start gap-3 rounded-[22px] bg-brand-mint p-4">
           <ShieldCheck size={20} className="mt-0.5 shrink-0 text-brand" />
-          <p className="text-[12.5px] leading-snug text-brand">Use at least 6 characters. Don&apos;t share your password — not even with other drivers.</p>
+          <p className="text-[12.5px] leading-snug text-brand">Use at least 8 characters, with letters and numbers. Changing it signs you out on any other phone. Don&apos;t share your password — not even with other drivers.</p>
         </div>
         <Card>
           <Field label="Current password" value={current} onChange={setCurrent} type={type} auto="current-password" />

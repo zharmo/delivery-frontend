@@ -104,11 +104,18 @@ export const updateProfile = (body: { phone?: string; vehicleType?: string; vehi
 export const setAvailability = (status: DutyStatus) =>
   apiFetch<{ status: string }>("/delivery/availability", { method: "PATCH", body: JSON.stringify({ status }) });
 
-export const changePassword = (currentPassword: string, newPassword: string) =>
-  apiFetch<{ changed: boolean }>("/delivery/password", {
+/**
+ * Changing the password signs the driver out on every other phone; this
+ * phone gets a fresh login back (`token`), which is saved right away.
+ */
+export const changePassword = async (currentPassword: string, newPassword: string) => {
+  const res = await apiFetch<{ changed: boolean; token?: string | null }>("/delivery/password", {
     method: "POST",
     body: JSON.stringify({ currentPassword, newPassword }),
   });
+  if (res?.token) setToken(res.token);
+  return res;
+};
 
 /* ── notifications ──────────────────────────────────────────────────── */
 

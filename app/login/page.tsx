@@ -12,6 +12,7 @@ import { login } from "@/lib/driver";
 import { OFFICE_PHONE } from "@/lib/office";
 import { telHref } from "@/lib/format";
 import { Button, INPUT } from "@/components/ui";
+import LogoIcon from "@/components/LogoIcon";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -55,11 +56,7 @@ export default function LoginPage() {
   return (
     <form onSubmit={submit} className="flex min-h-screen flex-col px-4 pb-32 pt-10">
       <div className="flex flex-col items-center text-center">
-        <div className="flex h-16 w-16 items-center justify-center rounded-[20px] bg-white shadow-card">
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-brand text-white">
-            <Truck size={24} />
-          </div>
-        </div>
+        <LogoIcon size={64} className="drop-shadow-[0_10px_22px_rgba(6,178,99,0.28)]" />
         <span className="mt-4 inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[10.5px] font-extrabold tracking-[0.1em] text-ink-soft shadow-card">
           <Truck size={13} /> DRIVER APP
         </span>

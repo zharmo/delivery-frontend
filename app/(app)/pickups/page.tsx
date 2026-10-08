@@ -11,6 +11,7 @@ import { useAsync } from "@/lib/driver";
 import { getEarnings, getPickupHistory, getPickups, type Pickup } from "@/lib/pickups";
 import { ago, dateTime, isToday, money, telHref, timeOf } from "@/lib/format";
 import { Card, EmptyState, ErrorState, Page, Pill, Skeleton, TopBar } from "@/components/ui";
+import ScrollRow from "@/components/ScrollRow";
 
 async function loadPickups() {
   const [live, history, earnings] = await Promise.all([getPickups(), getPickupHistory(), getEarnings().catch(() => null)]);
@@ -81,7 +82,7 @@ export default function PickupsPage() {
             {tab === "todo" ? (
               <>
                 {lists.live.length > 0 && (
-                  <div className="no-scrollbar -mx-4 flex gap-2 overflow-x-auto px-4">
+                  <ScrollRow outerClassName="-mx-4" className="gap-2 px-4" activeKey={filter} ariaLabel="Show">
                     {(
                       [
                         ["all", `All (${lists.live.length})`],
@@ -91,13 +92,15 @@ export default function PickupsPage() {
                     ).map(([k, l]) => (
                       <button
                         key={k}
+                        data-active={filter === k}
+                        aria-pressed={filter === k}
                         onClick={() => setFilter(k)}
-                        className={`shrink-0 rounded-full px-3.5 py-2 text-[12px] font-bold ${filter === k ? "bg-violet text-white" : "bg-white text-ink-soft shadow-card"}`}
+                        className={`shrink-0 whitespace-nowrap rounded-full px-3.5 py-2 text-[12px] font-bold ${filter === k ? "bg-violet text-white" : "bg-white text-ink-soft shadow-card"}`}
                       >
                         {l}
                       </button>
                     ))}
-                  </div>
+                  </ScrollRow>
                 )}
                 {shown.length === 0 ? (
                   <EmptyState

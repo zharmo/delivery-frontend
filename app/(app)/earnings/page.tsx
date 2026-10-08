@@ -14,6 +14,7 @@ import { useAsync } from "@/lib/driver";
 import { getEarnings, type LedgerEntry } from "@/lib/pickups";
 import { dateTime, dayHeading, dayKey, money, timeOf, toDate } from "@/lib/format";
 import { Card, EmptyState, ErrorState, Page, Skeleton, TopBar } from "@/components/ui";
+import ScrollRow from "@/components/ScrollRow";
 
 type Filter = "all" | "earned" | "cash" | "paid";
 
@@ -138,7 +139,7 @@ export default function MoneyPage() {
             </Card>
 
             {/* ledger */}
-            <div className="no-scrollbar -mx-4 flex gap-2 overflow-x-auto px-4">
+            <ScrollRow outerClassName="-mx-4" className="gap-2 px-4" activeKey={filter} ariaLabel="Show">
               {(
                 [
                   ["all", "All"],
@@ -149,13 +150,15 @@ export default function MoneyPage() {
               ).map(([k, l]) => (
                 <button
                   key={k}
+                  data-active={filter === k}
+                  aria-pressed={filter === k}
                   onClick={() => setFilter(k)}
-                  className={`shrink-0 rounded-full px-4 py-2 text-[12.5px] font-bold ${filter === k ? "bg-brand text-white" : "bg-white text-ink-soft shadow-card"}`}
+                  className={`shrink-0 whitespace-nowrap rounded-full px-4 py-2 text-[12.5px] font-bold ${filter === k ? "bg-brand text-white" : "bg-white text-ink-soft shadow-card"}`}
                 >
                   {l}
                 </button>
               ))}
-            </div>
+            </ScrollRow>
 
             {groups.length === 0 ? (
               <EmptyState icon={CircleDollarSign} title="Nothing here yet" text="Delivered trips, cash and payouts show here as they happen." />
