@@ -13,19 +13,24 @@ import { ArrowRight, Banknote, Bell, Bike, ChevronRight, CloudOff, Phone, Rotate
 import { getProfile, setAvailability, useAsync, errorText, type DutyStatus } from "@/lib/driver";
 import { getLiveJobs, getJobDashboard, nextStep, jobStyle, type Job } from "@/lib/jobs";
 import { getEarnings, getPickups, getPickupHistory } from "@/lib/pickups";
+import { getMyStoreItems } from "@/lib/door";
 import { firstName, greeting, isToday, money, telHref, todayLabel } from "@/lib/format";
 import { Avatar, Button, Card, ErrorState, Label, MiniStat, Page, Pill, Skeleton, StatusPill, TopBar, useToast } from "@/components/ui";
 
 async function loadHome() {
-  const [profile, jobs, dash, earnings, pickups, pickupHistory] = await Promise.all([
+  const [profile, jobs, dash, earnings, pickups, pickupHistory, store] = await Promise.all([
     getProfile(),
     getLiveJobs(),
     getJobDashboard(),
     getEarnings(),
     getPickups(),
     getPickupHistory().catch(() => []),
+    getMyStoreItems().catch(() => null),
   ]);
-  return { profile, jobs, dash, earnings, pickups, pickupsToday: pickupHistory.filter((p) => p.status === "DELIVERED" && isToday(p.timestamps.deliveredAt)).length };
+  return {
+    profile, jobs, dash, earnings, pickups, store,
+    pickupsToday: pickupHistory.filter((p) => p.status === "DELIVERED" && isToday(p.timestamps.deliveredAt)).length,
+  };
 }
 
 export default function HomePage() {
@@ -203,6 +208,24 @@ function HomeBody({
           </div>
         </Link>
       </div>
+
+      {data.store && data.store.items.length > 0 && (
+        <Link href="/store" className="flex items-center gap-3 rounded-[22px] bg-accent-light p-4 shadow-card">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-accent text-white">
+            <Store size={19} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-[14.5px] font-extrabold text-accent-deep">Take items to the Bakhaar store</p>
+            <p className="text-[11.5px] text-accent-deep/80">
+              {data.store.items.length} refused item line{data.store.items.length === 1 ? "" : "s"}
+              {data.store.payWaiting > 0 ? ` · ${money(data.store.payWaiting)} pay waiting` : ""}
+            </p>
+          </div>
+          <span className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-accent-tint">
+            <ChevronRight size={17} />
+          </span>
+        </Link>
+      )}
 
       <Link href="/pickups" className="flex items-center gap-3 rounded-[22px] bg-white p-4 shadow-card">
         <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-violet-light text-violet">

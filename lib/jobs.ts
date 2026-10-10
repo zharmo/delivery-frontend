@@ -16,9 +16,11 @@
 //      on a cash order, they pay the delivery fee (the driver says if they
 //      did). If it's the shop's fault, the customer pays nothing.
 // There is no delivery code — the driver never asks the customer for one.
+// Door outcomes (lib/door.ts): items are marked one by one; refused items go
+// to the Bakhaar store, not straight back to the shops.
 "use client";
 
-import { apiFetch, API_BASE, ApiError, getToken } from "@/lib/api";
+import { apiFetch, API_BASE, ApiError, getCsrf } from "@/lib/api";
 
 /* ── shapes ─────────────────────────────────────────────────────────── */
 
@@ -131,6 +133,8 @@ export interface Job {
   driverPay?: number;
   /** Set when the customer refused the whole basket at the door. */
   refusal?: { fault: "customer" | "shop"; feeCollected: number; feeRefused: boolean } | null;
+  /** Finished on the door screen: refused items still to take to the Bakhaar store. */
+  door?: { goodsWithDriver: number; payWaiting: number } | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -255,7 +259,9 @@ export function nextStep(job: Job): { label: string; tone: "brand" | "accent" | 
         ? { label: "No tries left — return to shops", tone: "danger" }
         : { label: "Try again or return to shops", tone: "accent" };
     case "CANCELLED":
-      return { label: "Refused — return to shops", tone: "danger" };
+      return job.door
+        ? { label: job.door.goodsWithDriver > 0 ? "Refused — take items to the Bakhaar store" : "Refused — recorded", tone: job.door.goodsWithDriver > 0 ? "danger" : "muted" }
+        : { label: "Refused — return to shops", tone: "danger" };
     case "DELIVERED":
       return { label: "Delivered", tone: "brand" };
     case "RETURNED":
@@ -296,9 +302,12 @@ function post<T = ActionResult>(path: string, body?: unknown) {
   });
 }
 
-/** "I have this shop's bag." One tick per shop. */
-export const collectStop = (jobId: string, stopId: string) =>
-  post(`/delivery/jobs/${jobId}/stops/${stopId}/collect`);
+/**
+ * "I have this shop's bag." One tick per shop — after ticking every item in
+ * it (itemsChecked), so a missing item can be traced later.
+ */
+export const collectStop = (jobId: string, stopId: string, itemsChecked = true) =>
+  post(`/delivery/jobs/${jobId}/stops/${stopId}/collect`, { itemsChecked });
 
 /** Undo a mis-tap. */
 export const uncollectStop = (jobId: string, stopId: string) =>
@@ -339,12 +348,19 @@ export const failJob = (jobId: string, body: { reason: string; notes?: string })
 export async function uploadProofPhoto(file: File): Promise<string> {
   const form = new FormData();
   form.append("image", file);
-  const token = getToken();
-  const res = await fetch(`${API_BASE}/delivery/ops/uploads/proof`, {
-    method: "POST",
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-    body: form,
-  });
+  // The sign-in is an HttpOnly cookie; a change must also carry the CSRF number.
+  const send = async (csrf: string | null) =>
+    fetch(`${API_BASE}/delivery/ops/uploads/proof`, {
+      method: "POST",
+      credentials: "include",
+      headers: csrf ? { "X-CSRF-Token": csrf } : {},
+      body: form,
+    });
+  let res = await send(await getCsrf());
+  if (res.status === 403 && res.headers.get("X-CSRF") === "failed") {
+    const fresh = await getCsrf(true);
+    if (fresh) res = await send(fresh);
+  }
   const json = await res.json().catch(() => ({}));
   if (!res.ok || !json.success) throw new ApiError(json.message ?? "Photo upload failed", res.status);
   return json.data.url as string;
@@ -362,7 +378,7 @@ export function fileUrl(path: string | null | undefined) {
  * feePaid: only for the customer's choice on a cash order — did they pay
  * the delivery fee? (true = the cash is in your hand, false = they refused.)
  */
-export const cancelJob = (jobId: string, body: { reason: string; notes?: string; feePaid?: boolean }) =>
+export const cancelJob = (jobId: string, body: { reason: string; notes?: string; feePaid?: boolean; photoUrl?: string }) =>
   post<ActionResult & { fault: "customer" | "shop"; feeCollected: number; feeRefused: boolean; refundsQueued: number }>(
     `/delivery/jobs/${jobId}/cancel`,
     body

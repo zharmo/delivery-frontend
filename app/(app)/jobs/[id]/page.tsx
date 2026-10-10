@@ -127,6 +127,8 @@ function CustomerCard({ job, title = "Customer drop-off", children }: { job: Job
 
 function CollectView({ job, onChange, toast }: ViewProps) {
   const [busy, setBusy] = useState<string | null>(null);
+  // Door outcomes: tick every item in the shop's bag before taking it.
+  const [checks, setChecks] = useState<Record<string, boolean>>({});
   const [err, setErr] = useState<string | null>(null);
   const stops = job.stops.filter((s) => s.status !== "MOVED");
   const collected = stops.filter((s) => s.status === "COLLECTED").length;
@@ -235,30 +237,47 @@ function CollectView({ job, onChange, toast }: ViewProps) {
                     <div className="mt-3">
                       <CallNav phone={s.shop.phone} place={[s.shop.name, s.shop.location]} callLabel="Call shop" navLabel="Open map" primary="call" size="sm" />
                     </div>
-                    <div className="mt-3 flex flex-col gap-2">
-                      {s.items.map((it) => (
-                        <div key={it.id} className="flex items-center gap-3 rounded-2xl bg-surface-sunken p-2.5">
-                          <ItemThumb item={it} size={48} />
-                          <div className="min-w-0 flex-1">
-                            <p className="truncate text-[13px] font-extrabold text-ink">{it.productName}</p>
-                            <p className="truncate text-[11.5px] text-ink-muted">
-                              Qty {it.quantity}
-                              {it.variantLabel ? ` · ${it.variantLabel}` : ""}
-                            </p>
-                          </div>
-                          <span className="shrink-0 text-[11px] font-bold text-ink-faint">{it.orderNumber}</span>
-                        </div>
-                      ))}
+                    {!notReady && <p className="mt-3 text-[11.5px] font-bold text-ink-muted">Check each item in the bag and tick it — size, colour and number.</p>}
+                    <div className="mt-2 flex flex-col gap-2">
+                      {s.items.map((it) => {
+                        const on = !!checks[it.id];
+                        return (
+                          <button
+                            key={it.id}
+                            type="button"
+                            disabled={notReady}
+                            onClick={() => setChecks((c) => ({ ...c, [it.id]: !c[it.id] }))}
+                            aria-pressed={on}
+                            className={`flex items-center gap-3 rounded-2xl border-2 p-2.5 text-left ${on ? "border-brand bg-brand-light/50" : "border-transparent bg-surface-sunken"}`}
+                          >
+                            <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-lg border-2 ${on ? "border-brand bg-brand text-white" : "border-ink-faint/50 bg-white"}`}>
+                              {on && <Check size={14} strokeWidth={3} />}
+                            </span>
+                            <ItemThumb item={it} size={48} />
+                            <div className="min-w-0 flex-1">
+                              <p className="break-words text-[13px] font-extrabold text-ink">{it.productName}</p>
+                              <p className="break-words text-[11.5px] text-ink-muted">
+                                Qty {it.quantity}
+                                {it.variantLabel ? ` · ${it.variantLabel}` : ""}
+                              </p>
+                            </div>
+                          </button>
+                        );
+                      })}
                     </div>
                     <Button
-                      onClick={() => act(() => collectStop(job.id, s.id), s.id, `${s.shop.name}'s bag is in your bag`)}
+                      onClick={() => act(() => collectStop(job.id, s.id, true), s.id, `${s.shop.name}'s bag is in your bag`)}
                       loading={busy === s.id}
-                      disabled={notReady || (busy !== null && busy !== s.id)}
+                      disabled={notReady || s.items.some((it) => !checks[it.id]) || (busy !== null && busy !== s.id)}
                       icon={ShoppingBag}
                       className="mt-3 w-full"
                       variant={active ? "primary" : "secondary"}
                     >
-                      {notReady ? "Shop is not ready yet" : "I have this shop's bag"}
+                      {notReady
+                        ? "Shop is not ready yet"
+                        : s.items.some((it) => !checks[it.id])
+                          ? `Tick every item (${s.items.filter((it) => !checks[it.id]).length} left)`
+                          : "I have this shop's bag"}
                     </Button>
                   </>
                 )}
@@ -383,7 +402,7 @@ function OnTheWayView({ job, onChange, toast }: ViewProps) {
           <button onClick={() => setFailOpen(true)} className="flex min-h-[44px] items-center justify-center gap-1.5 text-[13px] font-extrabold text-ink-soft">
             <XCircle size={16} /> Couldn&apos;t deliver
           </button>
-          <Link href={`/jobs/${job.id}/refused`} className="flex min-h-[44px] items-center justify-center gap-1.5 text-[13px] font-extrabold text-danger">
+          <Link href={`/jobs/${job.id}/handover`} className="flex min-h-[44px] items-center justify-center gap-1.5 text-[13px] font-extrabold text-danger">
             <Ban size={16} /> Customer refused
           </Link>
         </div>
@@ -567,7 +586,7 @@ function FailedView({ job, onChange, onReturn, toast }: ViewProps & { onReturn: 
           <button onClick={onReturn} className="flex min-h-[44px] items-center justify-center gap-1.5 text-[13px] font-extrabold text-ink-soft">
             <Undo2 size={16} /> Return to shops
           </button>
-          <Link href={`/jobs/${job.id}/refused`} className="flex min-h-[44px] items-center justify-center gap-1.5 text-[13px] font-extrabold text-danger">
+          <Link href={`/jobs/${job.id}/handover`} className="flex min-h-[44px] items-center justify-center gap-1.5 text-[13px] font-extrabold text-danger">
             <Ban size={16} /> Customer refused
           </Link>
         </div>
@@ -578,7 +597,39 @@ function FailedView({ job, onChange, onReturn, toast }: ViewProps & { onReturn: 
 
 /* ── 4. take everything back to the shops ───────────────────────────── */
 
-function ReturnView({ job, onChange, onCancel, toast }: ViewProps & { onCancel?: () => void }) {
+function ReturnView(props: ViewProps & { onCancel?: () => void }) {
+  return props.job.door ? <StoreView job={props.job} /> : <ShopReturnView {...props} />;
+}
+
+/** A trip refused on the door screen: the items go to the Bakhaar store. */
+function StoreView({ job }: { job: JobDetail }) {
+  const left = job.door?.goodsWithDriver ?? 0;
+  return (
+    <Page bottom="bar">
+      <div className={`rounded-[22px] p-4 ${left > 0 ? "bg-danger text-white" : "bg-brand-mint text-brand"}`}>
+        <div className="flex items-start gap-3">
+          <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ${left > 0 ? "bg-white/20" : "bg-white"}`}>
+            {left > 0 ? <Undo2 size={21} /> : <Check size={21} />}
+          </div>
+          <div>
+            <p className="text-[17px] font-extrabold leading-snug">{left > 0 ? "Take the refused items to the Bakhaar store" : "The store has everything"}</p>
+            <p className={`mt-1 text-[12.5px] leading-snug ${left > 0 ? "text-white/85" : "text-brand-tint"}`}>
+              {left > 0
+                ? `${left} item line${left === 1 ? "" : "s"} still with you. The store checks them and records them — not the shops.`
+                : "Nothing left to bring from this trip."}
+              {left > 0 && (job.door?.payWaiting ?? 0) > 0 ? ` Your ${money(job.door?.payWaiting ?? 0)} for this trip is added then.` : ""}
+            </p>
+          </div>
+        </div>
+      </div>
+      <BottomBar>
+        <Button href="/store" icon={ShoppingBag} className="w-full">My items for the store</Button>
+      </BottomBar>
+    </Page>
+  );
+}
+
+function ShopReturnView({ job, onChange, onCancel, toast }: ViewProps & { onCancel?: () => void }) {
   const stops = job.stops.filter((s) => s.status !== "MOVED" && s.status !== "DELIVERED");
   const [ticked, setTicked] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
